@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
+	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
 
 	routev1 "github.com/openshift/api/route/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -46,6 +47,7 @@ const (
 // Add creates a new WildFlyServer Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
+	exec.
 	return add(mgr, newReconciler(mgr))
 }
 
@@ -135,6 +137,25 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
+	// check WildFlyServerSpec if it's about to be scaled down
+	podList, err := r.getPodsForWildFly(wildflyServer)
+	if err != nil {
+		reqLogger.Error(err, "Failed to list pods.", "WildFlyServer.Namespace", wildflyServer.Namespace, "WildFlyServer.Name", wildflyServer.Name)
+		return reconcile.Result{}, err
+	}
+	wildflyServerSpecSize := wildflyServer.Spec.Size
+	if len(podList.Items) > int(wildflyServerSpecSize) {
+		// scaledown scenario, need to handle transction recovery [ochaloup]
+		lastPod := podList.Items[len(podList.Items)-1]
+
+		lastPod.ObjectMeta.Labels["wildfly.scaledown.txn.recovery"] = "true"
+		if err = r.client.Update(context.TODO(), &lastPod); err != nil {
+			reqLogger.Error(err, "Failed to update Pod ", lastPod, " with labels ", lastPod.ObjectMeta.Labels)
+			return reconcile.Result{}, err
+		}
+		wildflyutil.ExecRemote(lastPod, "echo 'helooooooooooooooooooooooooooooooooooooo'")
+	}
+
 	// check if the stateful set is up to date with the WildFlyServerSpec
 	if checkUpdate(&wildflyServer.Spec, foundStatefulSet) {
 		err = r.client.Update(context.TODO(), foundStatefulSet)
@@ -198,20 +219,8 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 
 	// Requeue until the pod list matches the spec's size
-	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labelsForWildFly(wildflyServer))
-	listOps := &client.ListOptions{
-		Namespace:     wildflyServer.Namespace,
-		LabelSelector: labelSelector,
-	}
-	err = r.client.List(context.TODO(), listOps, podList)
-	if err != nil {
-		reqLogger.Error(err, "Failed to list pods.", "WildFlyServer.Namespace", wildflyServer.Namespace, "WildFlyServer.Name", wildflyServer.Name)
-		return reconcile.Result{}, err
-	}
-	size := wildflyServer.Spec.Size
-	if len(podList.Items) != int(size) {
-		reqLogger.Info("Number of pods does not match the desired size", "PodList.Size", len(podList.Items), "Size", size)
+	if len(podList.Items) != int(wildflyServerSpecSize) {
+		reqLogger.Info("Number of pods does not match the desired size", "PodList.Size", len(podList.Items), "Size", wildflyServerSpecSize)
 		return reconcile.Result{Requeue: true}, nil
 	}
 
@@ -282,6 +291,19 @@ func checkUpdate(spec *wildflyv1alpha1.WildFlyServerSpec, statefuleSet *appsv1.S
 	}
 
 	return update
+}
+
+// listing pods which belongs to the WildFly server
+//   the pods are differentiated based on the selectors
+func (r *ReconcileWildFlyServer) getPodsForWildFly(w *wildflyv1alpha1.WildFlyServer) (*corev1.PodList, error) {
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labelsForWildFly(w))
+	listOps := &client.ListOptions{
+		Namespace:     w.Namespace,
+		LabelSelector: labelSelector,
+	}
+	err := r.client.List(context.TODO(), listOps, podList)
+	return podList, err
 }
 
 // matches checks if the envVar from the WildFlyServerSpec matches the same env var from the container.
