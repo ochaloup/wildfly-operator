@@ -65,7 +65,11 @@ func TestWildFlyServerControllerCreatesStatefulSet(t *testing.T) {
 			Namespace: namespace,
 		},
 	}
+	// secret will be created
 	res, err := r.Reconcile(req)
+	require.NoError(t, err)
+	// statefulset will be created
+	res, err = r.Reconcile(req)
 	require.NoError(t, err)
 
 	// Check the result of reconciliation to make sure it has the desired state.
