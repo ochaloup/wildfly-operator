@@ -47,7 +47,6 @@ const (
 // Add creates a new WildFlyServer Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	exec.
 	return add(mgr, newReconciler(mgr))
 }
 
@@ -153,7 +152,15 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			reqLogger.Error(err, "Failed to update Pod ", lastPod, " with labels ", lastPod.ObjectMeta.Labels)
 			return reconcile.Result{}, err
 		}
-		wildflyutil.ExecRemote(lastPod, "echo 'helooooooooooooooooooooooooooooooooooooo'")
+
+		reqLogger.Info(">>>>> Going for scaledown with pod ", lastPod.ObjectMeta.Name)
+
+		result, err := wildflyutil.ExecRemote(lastPod, "echo 'helooooooooooooooooooooooooooooooooooooo'")
+		if err != nil {
+			reqLogger.Error(err, "run remote execution at pod ", lastPod.ObjectMeta.Name)
+			return reconcile.Result{}, err
+		}
+		reqLogger.Info("Calling pod ", lastPod.ObjectMeta.Name, "to echo ", result)
 	}
 
 	// check if the stateful set is up to date with the WildFlyServerSpec

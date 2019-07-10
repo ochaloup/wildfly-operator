@@ -1,6 +1,8 @@
 package util
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"strings"
 
@@ -11,8 +13,14 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
-//ExecRemote executes arbitrary command inside the pod
+//ExecRemote executes a command inside the remote pod
 func ExecRemote(pod corev1.Pod, command string) (string, error) {
+	fmt.Println(">>>>>>>>>>>>>>> at start...")
+	var (
+		execOut bytes.Buffer
+		execErr bytes.Buffer
+	)
+	fmt.Println(">>>> kubeconfig taking")
 	// Instantiate loader for kubeconfig file.
 	kubeconfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientcmd.NewDefaultClientConfigLoadingRules(),
@@ -27,20 +35,20 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 			panic(err)
 		}
 	*/
-
+	fmt.Println(">>>> kubeconfig taken", kubeconfig)
 	// Get a rest.Config from the kubeconfig file.  This will be passed into all
 	// the client objects we create.
 	restconfig, err := kubeconfig.ClientConfig()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
 
 	// Create a Kubernetes core/v1 client.
 	coreclient, err := corev1client.NewForConfig(restconfig)
 	if err != nil {
-		panic(err)
+		return "", err
 	}
-
+	fmt.Println(">>>> preparing rest clinet")
 	// Prepare the API URL used to execute another process within the Pod.  In
 	// this case, we'll run a remote shell.
 	req := coreclient.RESTClient().
@@ -51,30 +59,33 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: pod.Spec.Containers[0].Name,
-			Command:   []string{"/bin/sh"},
-			Stdin:     true,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       true,
+			Command:   []string{"/bin/sh", "-c", command},
+			// Stdin:     true,
+			Stdout: true,
+			Stderr: true,
+			// TTY:       true,
 		}, scheme.ParameterCodec)
 
 	exec, err := remotecommand.NewSPDYExecutor(restconfig, "POST", req.URL())
 	if err != nil {
 		return "", err
 	}
-
-	stdIn := newStringReader([]string{"-c", command})
-	stdOut := new(writer)
-	stdErr := new(writer)
-
+	fmt.Println(">>>> going to stream")
 	err = exec.Stream(remotecommand.StreamOptions{
-		Stdin:  stdIn,
-		Stdout: stdOut,
-		Stderr: stdErr,
+		Stdout: &execOut,
+		Stderr: &execErr,
 		Tty:    false,
 	})
 
-	return "", err
+	if err != nil {
+		return "", fmt.Errorf("cannot execute '%v': %v", command, err)
+	}
+	if execErr.Len() > 0 {
+		return "", fmt.Errorf("command execution '%v' got stderr: %v", command, execErr.String())
+	}
+	result := execOut.String()
+	fmt.Println(">>>> going to read exec out", result)
+	return result, nil
 }
 
 func newStringReader(ss []string) io.Reader {
