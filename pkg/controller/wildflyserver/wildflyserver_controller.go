@@ -144,23 +144,32 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 	wildflyServerSpecSize := wildflyServer.Spec.Size
 	if len(podList.Items) > int(wildflyServerSpecSize) {
-		// scaledown scenario, need to handle transction recovery [ochaloup]
+		// scaledown scenario, need to handle transction recovery
 		lastPod := podList.Items[len(podList.Items)-1]
 
-		lastPod.ObjectMeta.Labels["wildfly.scaledown.txn.recovery"] = "true"
+		lastPod.ObjectMeta.Labels["wildfly.operator.service"] = "scaling-down"
 		if err = r.client.Update(context.TODO(), &lastPod); err != nil {
-			reqLogger.Error(err, "Failed to update Pod ", lastPod, " with labels ", lastPod.ObjectMeta.Labels)
+			reqLogger.Error(err, "Failed to update pod specification", "Pod name", lastPod.ObjectMeta.Name, " with labels ", lastPod.ObjectMeta.Labels)
 			return reconcile.Result{}, err
 		}
 
-		reqLogger.Info(">>>>> Going for scaledown with pod ", lastPod.ObjectMeta.Name)
+		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name)
 
-		result, err := wildflyutil.ExecRemote(lastPod, "echo 'helooooooooooooooooooooooooooooooooooooo'")
+		// pod is still available for remote command execution as it's running
+		_, err := wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
 		if err != nil {
-			reqLogger.Error(err, "run remote execution at pod ", lastPod.ObjectMeta.Name)
+			reqLogger.Error(err, "Fail to run remote command to probe log store", "pod name", lastPod.ObjectMeta.Name)
 			return reconcile.Result{}, err
 		}
-		reqLogger.Info("Calling pod ", lastPod.ObjectMeta.Name, "to echo ", result)
+		result, err := wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:read-children-resources(child-type=transactions)'")
+		if err != nil {
+			reqLogger.Error(err, "Fail to run remote command to get number of unfinished transactions", "pod name", lastPod.ObjectMeta.Name)
+			return reconcile.Result{}, err
+		}
+		// /opt/jboss/wildfly/bin/jboss-cli.sh -c --commands='/subsystem=transactions:write-attribute(name=recovery-listener, value=true),:reload()'
+		// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-5.9.5.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
+		reqLogger.Info(">>>>> Execution of remote command ", "pod name", lastPod.ObjectMeta.Name, "execution output:", result)
+		// return reconcile.Result{Requeue: true}, nil // success but we need to requeue
 	}
 
 	// check if the stateful set is up to date with the WildFlyServerSpec
@@ -304,7 +313,9 @@ func checkUpdate(spec *wildflyv1alpha1.WildFlyServerSpec, statefuleSet *appsv1.S
 //   the pods are differentiated based on the selectors
 func (r *ReconcileWildFlyServer) getPodsForWildFly(w *wildflyv1alpha1.WildFlyServer) (*corev1.PodList, error) {
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labelsForWildFly(w))
+	labelsForWildfly := labelsForWildFly(w)
+	delete(labelsForWildfly, "wildfly.operator.service")
+	labelSelector := labels.SelectorFromSet(labelsForWildfly)
 	listOps := &client.ListOptions{
 		Namespace:     w.Namespace,
 		LabelSelector: labelSelector,
@@ -601,6 +612,7 @@ func labelsForWildFly(w *wildflyv1alpha1.WildFlyServer) map[string]string {
 	labels["app.kubernetes.io/name"] = w.Name
 	labels["app.kubernetes.io/managed-by"] = os.Getenv("LABEL_APP_MANAGED_BY")
 	labels["app.openshift.io/runtime"] = os.Getenv("LABEL_APP_RUNTIME")
+	labels["wildfly.operator.service"] = "active"
 	if w.Labels != nil {
 		for labelKey, labelValue := range w.Labels {
 			labels[labelKey] = labelValue

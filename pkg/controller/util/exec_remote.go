@@ -3,8 +3,6 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"io"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -15,27 +13,17 @@ import (
 
 //ExecRemote executes a command inside the remote pod
 func ExecRemote(pod corev1.Pod, command string) (string, error) {
-	fmt.Println(">>>>>>>>>>>>>>> at start...")
 	var (
 		execOut bytes.Buffer
 		execErr bytes.Buffer
 	)
-	fmt.Println(">>>> kubeconfig taking")
+
 	// Instantiate loader for kubeconfig file.
 	kubeconfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientcmd.NewDefaultClientConfigLoadingRules(),
 		&clientcmd.ConfigOverrides{},
 	)
 
-	// Determine the Namespace referenced by the current context in the
-	// kubeconfig file.
-	/*
-		namespace, _, err := kubeconfig.Namespace()
-		if err != nil {
-			panic(err)
-		}
-	*/
-	fmt.Println(">>>> kubeconfig taken", kubeconfig)
 	// Get a rest.Config from the kubeconfig file.  This will be passed into all
 	// the client objects we create.
 	restconfig, err := kubeconfig.ClientConfig()
@@ -48,7 +36,6 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Println(">>>> preparing rest clinet")
 	// Prepare the API URL used to execute another process within the Pod.  In
 	// this case, we'll run a remote shell.
 	req := coreclient.RESTClient().
@@ -70,7 +57,6 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Println(">>>> going to stream")
 	err = exec.Stream(remotecommand.StreamOptions{
 		Stdout: &execOut,
 		Stderr: &execErr,
@@ -83,25 +69,5 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 	if execErr.Len() > 0 {
 		return "", fmt.Errorf("command execution '%v' got stderr: %v", command, execErr.String())
 	}
-	result := execOut.String()
-	fmt.Println(">>>> going to read exec out", result)
-	return result, nil
-}
-
-func newStringReader(ss []string) io.Reader {
-	formattedString := strings.Join(ss, "\n")
-	reader := strings.NewReader(formattedString)
-	return reader
-}
-
-type writer struct {
-	Str []string
-}
-
-func (w *writer) Write(p []byte) (n int, err error) {
-	str := string(p)
-	if len(str) > 0 {
-		w.Str = append(w.Str, str)
-	}
-	return len(str), nil
+	return execOut.String(), nil
 }
