@@ -2,11 +2,14 @@ package wildflyserver
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"net/http"
 	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
 	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
@@ -37,6 +40,7 @@ const (
 	httpApplicationPort         int32 = 8080
 	httpManagementPort          int32 = 9990
 	standaloneServerDataDirPath       = "/wildfly/standalone/data"
+	transactionRecoverySecret         = "transaction.recovery.scaledown"
 )
 
 /**
@@ -154,9 +158,30 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 
 		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name)
+		txnRecoverySecret := &corev1.Secret{}
+		txnRecoverySecretSearchTerms := client.ObjectKey{
+			Name:      wildflyServer.Name + "-" + transactionRecoverySecret,
+			Namespace: wildflyServer.Namespace,
+		}
+		err := r.client.Get(context.TODO(), txnRecoverySecretSearchTerms, txnRecoverySecret)
+		if err != nil {
+			// TODO: this is kind of for start panicing :)
+			reqLogger.Error(err, "Fail to get txn recovery secret to connect to running jboss cli", "pod name", lastPod.ObjectMeta.Name)
+			return reconcile.Result{}, err
+		}
+		reqLogger.Info("Obtained secret!", "my treasure", txnRecoverySecret.StringData["password"])
+		// curl -X POST -uadmin:admin --digest 'http://localhost:9990/management' --header "Content-Type: application/json" -d '{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":     "log-file", "json.pretty":1}'
+		client := &http.Client{Timeout: time.Second * 10}
+		req, err := http.NewRequest("POST", lastPod.Spec.Hostname+":"+string(httpManagementPort), nil)
+		if err != nil {
+			reqLogger.Error(err, "Fail to create HTTP request", "pod host name", lastPod.Spec.Hostname)
+			return reconcile.Result{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.setDigestAuth("", "")
 
 		// pod is still available for remote command execution as it's running
-		_, err := wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
+		_, err = wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
 		if err != nil {
 			reqLogger.Error(err, "Fail to run remote command to probe log store", "pod name", lastPod.ObjectMeta.Name)
 			return reconcile.Result{}, err
@@ -347,6 +372,7 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 	replicas := w.Spec.Size
 	applicationImage := w.Spec.ApplicationImage
 	volumeName := w.Name + "-volume"
+	txnRecoverySecret := r.txnRecoveryJBossCliPasswordSecret(w)
 
 	statefulSet := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
@@ -384,6 +410,17 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 						LivenessProbe: createLivenessProbe(),
 						// Readiness Probe is options
 						ReadinessProbe: createReadinessProbe(),
+						Lifecycle: &corev1.Lifecycle{
+							PostStart: &corev1.Handler{
+								Exec: &corev1.ExecAction{
+									Command: []string{
+										"/bin/sh",
+										"-c",
+										standaloneServerDataDirPath + "/../../bin/add-user.sh " + txnRecoverySecret.StringData["username"] + " " + txnRecoverySecret.StringData["password"] + " --silent",
+									},
+								},
+							},
+						},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      volumeName,
 							MountPath: standaloneServerDataDirPath,
@@ -542,6 +579,35 @@ func (r *ReconcileWildFlyServer) routeForWildFly(w *wildflyv1alpha1.WildFlyServe
 	controllerutil.SetControllerReference(w, route, r.scheme)
 
 	return route
+}
+
+// newSecretForCR returns an empty secret for holding the secrets merge
+func (r *ReconcileWildFlyServer) txnRecoveryJBossCliPasswordSecret(w *wildflyv1alpha1.WildFlyServer) *corev1.Secret {
+	password := generateToken(16)
+	secret := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      w.Name + "-" + transactionRecoverySecret,
+			Namespace: w.Namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"username": transactionRecoverySecret,
+			"password": password,
+		},
+	}
+	// Set WildFlyServer instance as the owner and controller
+	controllerutil.SetControllerReference(w, secret, r.scheme)
+	return secret
+}
+
+func generateToken(lenght int) string {
+	b := make([]byte, lenght)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
 // getPodStatus returns the pod names of the array of pods passed in
