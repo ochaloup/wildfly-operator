@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	httpDigestAuth "github.com/ryanjdew/http-digest-auth-client"
+
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
 	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
 
@@ -126,7 +128,13 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: wildflyServer.Name, Namespace: wildflyServer.Namespace}, foundStatefulSet)
 	if err != nil && errors.IsNotFound(err) {
 		// Define a new statefulSet
-		statefulSet := r.statefulSetForWildFly(wildflyServer)
+		txnRecoverySecret := r.txnRecoveryJBossCliPasswordSecret(wildflyServer)
+		err = r.client.Create(context.TODO(), txnRecoverySecret)
+		if err != nil {
+			reqLogger.Error(err, "Failed to create Secret necessary for txn recovery.", "Secret.Namespace", txnRecoverySecret.Namespace, "Secret.Name", txnRecoverySecret.Name)
+			return reconcile.Result{}, err
+		}
+		statefulSet := r.statefulSetForWildFly(wildflyServer, txnRecoverySecret)
 		reqLogger.Info("Creating a new StatefulSet.", "StatefulSet.Namespace", statefulSet.Namespace, "StatefulSet.Name", statefulSet.Name)
 		err = r.client.Create(context.TODO(), statefulSet)
 		if err != nil {
@@ -171,14 +179,28 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 		reqLogger.Info("Obtained secret!", "my treasure", txnRecoverySecret.StringData["password"])
 		// curl -X POST -uadmin:admin --digest 'http://localhost:9990/management' --header "Content-Type: application/json" -d '{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":     "log-file", "json.pretty":1}'
-		client := &http.Client{Timeout: time.Second * 10}
-		req, err := http.NewRequest("POST", lastPod.Spec.Hostname+":"+string(httpManagementPort), nil)
+		const jsonStream = `{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":"log-file", "json.pretty":1}`
+
+		httpClient := &http.Client{Timeout: time.Second * 10}
+		req, err := http.NewRequest("POST", lastPod.Spec.Hostname+":"+string(httpManagementPort), strings.NewReader(jsonStream))
 		if err != nil {
 			reqLogger.Error(err, "Fail to create HTTP request", "pod host name", lastPod.Spec.Hostname)
 			return reconcile.Result{}, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.setDigestAuth("", "")
+		// var digestAuth *httpDigestAuth.DigestHeaders
+		digestAuth := &httpDigestAuth.DigestHeaders{}
+		digestAuth, err = digestAuth.Auth(txnRecoverySecret.StringData["username"], txnRecoverySecret.StringData["password"], lastPod.Spec.Hostname+":"+string(httpManagementPort))
+		digestAuth.ApplyAuth(req)
+
+		resp, err := httpClient.Do(req)
+		defer resp.Body.Close()
+
+		if err != nil {
+			reqLogger.Error(err, "Fail invoke http request to management", "pod host name", lastPod.Spec.Hostname, "json", jsonStream)
+			return reconcile.Result{}, err
+		}
+		reqLogger.Info("Returned response is ", "response", resp)
 
 		// pod is still available for remote command execution as it's running
 		_, err = wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
@@ -367,12 +389,11 @@ func matches(container *v1.Container, envVar corev1.EnvVar) bool {
 }
 
 // statefulSetForWildFly returns a wildfly StatefulSet object
-func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFlyServer) *appsv1.StatefulSet {
+func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFlyServer, txnRecoverySecret *corev1.Secret) *appsv1.StatefulSet {
 	ls := labelsForWildFly(w)
 	replicas := w.Spec.Size
 	applicationImage := w.Spec.ApplicationImage
 	volumeName := w.Name + "-volume"
-	txnRecoverySecret := r.txnRecoveryJBossCliPasswordSecret(w)
 
 	statefulSet := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
