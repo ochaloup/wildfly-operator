@@ -140,18 +140,6 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		reqLogger.Error(err, "Failed to get Secret.", "txn recovery secret name", getTxnRecoverySecretName(wildflyServer))
 		return reconcile.Result{}, err
 	}
-	/*
-		dec := base64.NewDecoder(base64.StdEncoding, strings.NewReader(string(foundTxnRecoverySecret.Data["username"])))
-		buf := &bytes.Buffer{}
-		_, _ = io.Copy(buf, dec)
-		log.Info(">>>>>", "buffered copy", buf)
-
-		encodedString := string(foundTxnRecoverySecret.Data["username"])
-		decoded, err := base64.StdEncoding.DecodeString(encodedString)
-		decodedString := string(decoded)
-	*/
-	//log.Info(">>>>>>>>>>>>>>>>>> ", "encoded string", encodedString, "decoded bytarray", decoded, "decoded string", decodedString, "data", foundTxnRecoverySecret.Data)
-	log.Info(">>>>> ", "username", string(foundTxnRecoverySecret.Data["username"]), "password", string(foundTxnRecoverySecret.Data["password"]))
 
 	// Check if the statefulSet already exists, if not create a new one
 	foundStatefulSet := &appsv1.StatefulSet{}
@@ -190,7 +178,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 
 		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name)
-		reqLogger.Info("Obtained secret!", "my treasure user", foundTxnRecoverySecret.StringData["user"], "my treasure", foundTxnRecoverySecret.StringData["password"], "ccc", foundTxnRecoverySecret)
+		reqLogger.Info("Obtained secret!", "my treasure user", string(foundTxnRecoverySecret.Data["username"]), "my treasure", string(foundTxnRecoverySecret.Data["password"]))
 		// curl -X POST -uadmin:admin --digest 'http://localhost:9990/management' --header "Content-Type: application/json" -d '{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":     "log-file", "json.pretty":1}'
 		const jsonStream = `{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":"log-file", "json.pretty":1}`
 
@@ -203,7 +191,9 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		req.Header.Set("Content-Type", "application/json")
 		// var digestAuth *httpDigestAuth.DigestHeaders
 		digestAuth := &httpDigestAuth.DigestHeaders{}
-		digestAuth, err = digestAuth.Auth(foundTxnRecoverySecret.StringData["username"], foundTxnRecoverySecret.StringData["password"], lastPod.Spec.Hostname+":"+string(httpManagementPort))
+		hostToConnect := lastPod.Spec.Hostname + ":" + string(httpManagementPort)
+		log.Info("Connection to host digest auth", "url", hostToConnect)
+		digestAuth, err = digestAuth.Auth(string(foundTxnRecoverySecret.StringData["username"]), string(foundTxnRecoverySecret.StringData["password"]), hostToConnect)
 		digestAuth.ApplyAuth(req)
 
 		resp, err := httpClient.Do(req)
@@ -407,7 +397,7 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 	applicationImage := w.Spec.ApplicationImage
 	volumeName := w.Name + "-volume"
 
-	mgmtUser := txnRecoverySecret.StringData["username"]
+	mgmtUser := string(txnRecoverySecret.Data["username"])
 	mgmtPassword := generateWflyMgmtHashedPassword(txnRecoverySecret)
 
 	statefulSet := &appsv1.StatefulSet{
@@ -421,7 +411,8 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 			Labels:    ls,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: &replicas,
+			Replicas:    &replicas,
+			ServiceName: loadBalancerServiceName(w),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
@@ -560,10 +551,6 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 // loadBalancerForWildFly returns a loadBalancer service
 func (r *ReconcileWildFlyServer) loadBalancerForWildFly(w *wildflyv1alpha1.WildFlyServer) *corev1.Service {
 	labels := labelsForWildFly(w)
-	sessionAffinity := corev1.ServiceAffinityNone
-	if w.Spec.SessionAffinity {
-		sessionAffinity = corev1.ServiceAffinityClientIP
-	}
 	loadBalancer := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      loadBalancerServiceName(w),
@@ -571,9 +558,10 @@ func (r *ReconcileWildFlyServer) loadBalancerForWildFly(w *wildflyv1alpha1.WildF
 			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:            corev1.ServiceTypeLoadBalancer,
-			Selector:        labels,
-			SessionAffinity: sessionAffinity,
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: labels,
+			// SessionAffinity: sessionAffinity,
+			ClusterIP: corev1.ClusterIPNone,
 			Ports: []corev1.ServicePort{
 				{
 					Name: "http",
@@ -645,8 +633,8 @@ func getTxnRecoverySecretName(w *wildflyv1alpha1.WildFlyServer) string {
 }
 
 func generateWflyMgmtHashedPassword(s *corev1.Secret) string {
-	user := s.StringData["username"]
-	password := s.StringData["password"]
+	user := string(s.Data["username"])
+	password := string(s.Data["password"])
 	data := []byte(user + ":ManagementRealm:" + password)
 	return fmt.Sprintf("%x", md5.Sum(data))
 }
