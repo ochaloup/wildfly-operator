@@ -2,6 +2,7 @@ package wildflyserver
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"fmt"
 	"net/http"
@@ -42,7 +43,7 @@ const (
 	httpApplicationPort         int32 = 8080
 	httpManagementPort          int32 = 9990
 	standaloneServerDataDirPath       = "/wildfly/standalone/data"
-	transactionRecoverySecret         = "transaction.recovery.scaledown"
+	wflyMgmtTxnRecoveryUserName       = "transaction.recovery.scaledown"
 )
 
 /**
@@ -123,18 +124,41 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	// Check if the statefulSet already exists, if not create a new one
-	foundStatefulSet := &appsv1.StatefulSet{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: wildflyServer.Name, Namespace: wildflyServer.Namespace}, foundStatefulSet)
+	// Define secret jboss cli connection for txn recovery processing
+	foundTxnRecoverySecret := &v1.Secret{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: getTxnRecoverySecretName(wildflyServer), Namespace: wildflyServer.Namespace}, foundTxnRecoverySecret)
 	if err != nil && errors.IsNotFound(err) {
-		// Define a new statefulSet
 		txnRecoverySecret := r.txnRecoveryJBossCliPasswordSecret(wildflyServer)
 		err = r.client.Create(context.TODO(), txnRecoverySecret)
 		if err != nil {
 			reqLogger.Error(err, "Failed to create Secret necessary for txn recovery.", "Secret.Namespace", txnRecoverySecret.Namespace, "Secret.Name", txnRecoverySecret.Name)
 			return reconcile.Result{}, err
 		}
-		statefulSet := r.statefulSetForWildFly(wildflyServer, txnRecoverySecret)
+		// Secret created successfully - return and requeue
+		return reconcile.Result{Requeue: true}, nil
+	} else if err != nil {
+		reqLogger.Error(err, "Failed to get Secret.", "txn recovery secret name", getTxnRecoverySecretName(wildflyServer))
+		return reconcile.Result{}, err
+	}
+	/*
+		dec := base64.NewDecoder(base64.StdEncoding, strings.NewReader(string(foundTxnRecoverySecret.Data["username"])))
+		buf := &bytes.Buffer{}
+		_, _ = io.Copy(buf, dec)
+		log.Info(">>>>>", "buffered copy", buf)
+
+		encodedString := string(foundTxnRecoverySecret.Data["username"])
+		decoded, err := base64.StdEncoding.DecodeString(encodedString)
+		decodedString := string(decoded)
+	*/
+	//log.Info(">>>>>>>>>>>>>>>>>> ", "encoded string", encodedString, "decoded bytarray", decoded, "decoded string", decodedString, "data", foundTxnRecoverySecret.Data)
+	log.Info(">>>>> ", "username", string(foundTxnRecoverySecret.Data["username"]), "password", string(foundTxnRecoverySecret.Data["password"]))
+
+	// Check if the statefulSet already exists, if not create a new one
+	foundStatefulSet := &appsv1.StatefulSet{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: wildflyServer.Name, Namespace: wildflyServer.Namespace}, foundStatefulSet)
+	if err != nil && errors.IsNotFound(err) {
+		// Define a new statefulSet
+		statefulSet := r.statefulSetForWildFly(wildflyServer, foundTxnRecoverySecret)
 		reqLogger.Info("Creating a new StatefulSet.", "StatefulSet.Namespace", statefulSet.Namespace, "StatefulSet.Name", statefulSet.Name)
 		err = r.client.Create(context.TODO(), statefulSet)
 		if err != nil {
@@ -166,18 +190,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 
 		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name)
-		txnRecoverySecret := &corev1.Secret{}
-		txnRecoverySecretSearchTerms := client.ObjectKey{
-			Name:      wildflyServer.Name + "-" + transactionRecoverySecret,
-			Namespace: wildflyServer.Namespace,
-		}
-		err := r.client.Get(context.TODO(), txnRecoverySecretSearchTerms, txnRecoverySecret)
-		if err != nil {
-			// TODO: this is kind of for start panicing :)
-			reqLogger.Error(err, "Fail to get txn recovery secret to connect to running jboss cli", "pod name", lastPod.ObjectMeta.Name)
-			return reconcile.Result{}, err
-		}
-		reqLogger.Info("Obtained secret!", "my treasure", txnRecoverySecret.StringData["password"])
+		reqLogger.Info("Obtained secret!", "my treasure user", foundTxnRecoverySecret.StringData["user"], "my treasure", foundTxnRecoverySecret.StringData["password"], "ccc", foundTxnRecoverySecret)
 		// curl -X POST -uadmin:admin --digest 'http://localhost:9990/management' --header "Content-Type: application/json" -d '{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":     "log-file", "json.pretty":1}'
 		const jsonStream = `{"address": ["subsystem", "logging"], "operation":"read-children-resources", "child-type":"log-file", "json.pretty":1}`
 
@@ -190,16 +203,15 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		req.Header.Set("Content-Type", "application/json")
 		// var digestAuth *httpDigestAuth.DigestHeaders
 		digestAuth := &httpDigestAuth.DigestHeaders{}
-		digestAuth, err = digestAuth.Auth(txnRecoverySecret.StringData["username"], txnRecoverySecret.StringData["password"], lastPod.Spec.Hostname+":"+string(httpManagementPort))
+		digestAuth, err = digestAuth.Auth(foundTxnRecoverySecret.StringData["username"], foundTxnRecoverySecret.StringData["password"], lastPod.Spec.Hostname+":"+string(httpManagementPort))
 		digestAuth.ApplyAuth(req)
 
 		resp, err := httpClient.Do(req)
-		defer resp.Body.Close()
-
 		if err != nil {
 			reqLogger.Error(err, "Fail invoke http request to management", "pod host name", lastPod.Spec.Hostname, "json", jsonStream)
 			return reconcile.Result{}, err
 		}
+		defer resp.Body.Close()
 		reqLogger.Info("Returned response is ", "response", resp)
 
 		// pod is still available for remote command execution as it's running
@@ -395,6 +407,9 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 	applicationImage := w.Spec.ApplicationImage
 	volumeName := w.Name + "-volume"
 
+	mgmtUser := txnRecoverySecret.StringData["username"]
+	mgmtPassword := generateWflyMgmtHashedPassword(txnRecoverySecret)
+
 	statefulSet := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -437,7 +452,7 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 									Command: []string{
 										"/bin/sh",
 										"-c",
-										standaloneServerDataDirPath + "/../../bin/add-user.sh " + txnRecoverySecret.StringData["username"] + " " + txnRecoverySecret.StringData["password"] + " --silent",
+										fmt.Sprintf("echo '%s=%s' >> \"%s/../configuration/mgmt-users.properties\"", mgmtUser, mgmtPassword, standaloneServerDataDirPath),
 									},
 								},
 							},
@@ -611,18 +626,29 @@ func (r *ReconcileWildFlyServer) txnRecoveryJBossCliPasswordSecret(w *wildflyv1a
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      w.Name + "-" + transactionRecoverySecret,
+			Name:      getTxnRecoverySecretName(w),
 			Namespace: w.Namespace,
 		},
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"username": transactionRecoverySecret,
+			"username": wflyMgmtTxnRecoveryUserName,
 			"password": password,
 		},
 	}
 	// Set WildFlyServer instance as the owner and controller
 	controllerutil.SetControllerReference(w, secret, r.scheme)
 	return secret
+}
+
+func getTxnRecoverySecretName(w *wildflyv1alpha1.WildFlyServer) string {
+	return w.Name + "-" + wflyMgmtTxnRecoveryUserName
+}
+
+func generateWflyMgmtHashedPassword(s *corev1.Secret) string {
+	user := s.StringData["username"]
+	password := s.StringData["password"]
+	data := []byte(user + ":ManagementRealm:" + password)
+	return fmt.Sprintf("%x", md5.Sum(data))
 }
 
 func generateToken(lenght int) string {
