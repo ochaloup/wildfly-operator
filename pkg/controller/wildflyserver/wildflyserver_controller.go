@@ -191,8 +191,8 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		req.Header.Set("Content-Type", "application/json")
 		// var digestAuth *httpDigestAuth.DigestHeaders
 		digestAuth := &httpDigestAuth.DigestHeaders{}
-		hostToConnect := lastPod.Spec.Hostname + ":" + string(httpManagementPort)
-		log.Info("Connection to host digest auth", "url", hostToConnect)
+		hostToConnect := lastPod.Spec.Hostname + ":" + strconv.Itoa(int(httpManagementPort))
+		log.Info("Connection to host digest auth", "url", hostToConnect, "port", httpManagementPort, "converted port", strconv.Itoa(int(httpManagementPort)))
 		digestAuth, err = digestAuth.Auth(string(foundTxnRecoverySecret.StringData["username"]), string(foundTxnRecoverySecret.StringData["password"]), hostToConnect)
 		digestAuth.ApplyAuth(req)
 
