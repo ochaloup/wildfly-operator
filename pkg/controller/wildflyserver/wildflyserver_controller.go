@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,11 +43,12 @@ import (
 var log = logf.Log.WithName("controller_wildflyserver")
 
 const (
-	httpApplicationPort         int32 = 8080
-	httpManagementPort          int32 = 9990
-	recoveryPort                int32 = 4712
-	standaloneServerDataDirPath       = "/wildfly/standalone/data"
-	wflyMgmtTxnRecoveryUserName       = "transaction.recovery.scaledown"
+	httpApplicationPort           int32 = 8080
+	httpManagementPort            int32 = 9990
+	recoveryPort                  int32 = 4712
+	standaloneServerDataDirPath         = "/wildfly/standalone/data"
+	wflyMgmtTxnRecoveryUserName         = "transaction.recovery.scaledown"
+	labelWildflyOperatorInService       = "wildfly.operator.in.service"
 )
 
 var (
@@ -197,25 +197,20 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		reqLogger.Error(err, "Failed to list pods.", "WildFlyServer.Namespace", wildflyServer.Namespace, "WildFlyServer.Name", wildflyServer.Name)
 		return reconcile.Result{}, err
 	}
+	// TODO: do not enter the scaledown handling if the pod was already cleaned from transactions, use the pod status to check
 	wildflyServerSpecSize := wildflyServer.Spec.Size
 	if len(podList.Items) > int(wildflyServerSpecSize) {
 		// scaledown scenario, need to handle transction recovery
 		lastPod := podList.Items[len(podList.Items)-1]
 		lastPodName := lastPod.ObjectMeta.Name
-		i := sort.Search(len(wildflyServer.Status.Pods), func(i int) bool { return lastPodName == wildflyServer.Status.Pods[i].Name })
-		if i < 0 || i >= len(wildflyServer.Status.Pods) || lastPodName != wildflyServer.Status.Pods[i].Name {
-			err = fmt.Errorf("Not found IP for the scaling down pod %v", lastPodName)
-			reqLogger.Error(err, "Cannot run transaction scaledown process.", "wildflyServer", wildflyServer)
-			return reconcile.Result{}, err
-		}
-		lastPodIP := wildflyServer.Status.Pods[i].PodIP
+		lastPodIP := lastPod.Status.PodIP
 		if strings.Contains(lastPodIP, ":") {
 			lastPodIP = "[" + lastPodIP + "]" // for IPv6
 		}
 		reqLogger.Info("Found ip for the pod ", "podname", lastPodName, "podip", lastPodIP) // TODO: debug?
 
 		// removing the pod from the Service handling
-		lastPod.ObjectMeta.Labels["wildfly.operator.service"] = "under-scale-down-processing"
+		lastPod.ObjectMeta.Labels[labelWildflyOperatorInService] = "under-scale-down-processing"
 		if err = r.client.Update(context.TODO(), &lastPod); err != nil {
 			reqLogger.Error(err, "Failed to update pod labels", "Pod name", lastPod.ObjectMeta.Name, " with labels ", lastPod.ObjectMeta.Labels)
 			return reconcile.Result{}, err
@@ -223,7 +218,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 
 		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name) // TODO: debug?
 
-		managementURL := fmt.Sprintf("http://%v:%v", lastPodIP, httpManagementPort)
+		managementURL := fmt.Sprintf("http://%v:%v/management", lastPodIP, httpManagementPort)
 		username := string(foundTxnRecoverySecret.Data["username"])
 		password := string(foundTxnRecoverySecret.Data["password"])
 		reqLogger.Info("Connection to host digest auth", "url", managementURL, "username", username, "password", password) // TODO: debug/todelete?
@@ -237,24 +232,24 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 		res, err := httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
 		if err != nil {
-			reqLogger.Error(err, "Failed to process management operation for HTTP response", res)
+			reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
 			return reconcile.Result{}, err
 		}
 		defer res.Body.Close()
 		jsonBody, err := decodeJSONBody(res)
 		if err != nil {
-			reqLogger.Error(err, "Cannot decode JSON body from HTTP response", res)
+			reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
 			return reconcile.Result{}, err
 		}
 		if !isMgmtOutcomeSuccesful(res, jsonBody) {
-			reqLogger.Info("Fail to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res)
+			reqLogger.Info("Failed to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res)
 		}
 		// enabling the recovery listner requires reload if not already set
 		isReloadRequires := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
 		if isReloadRequires == "true" {
 			opEnableRecovery, err := fromJSONToReader(mgmtOpReload)
 			if err != nil {
-				reqLogger.Error(err, "Fail to parse JSON management command",
+				reqLogger.Error(err, "Failed to parse JSON management command",
 					"command", mgmtOpReload, "for pod", lastPodName, "IP address", lastPodIP)
 				return reconcile.Result{}, err
 			}
@@ -270,7 +265,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		// _, err = wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
 		opProbe, err := fromJSONToReader(mgmtOpTxnProbe)
 		if err != nil {
-			reqLogger.Error(err, "Fail to parse JSON management command",
+			reqLogger.Error(err, "Failed to parse JSON management command",
 				"command", mgmtOpTxnProbe, "for pod", lastPodName, "IP address", lastPodIP)
 			return reconcile.Result{}, err
 		}
@@ -283,19 +278,19 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		isRequeue := false
 		opTxnRead, err := fromJSONToReader(mgmtOpTxnRead)
 		if err != nil {
-			reqLogger.Error(err, "Fail to parse JSON management command",
+			reqLogger.Error(err, "Failed to parse JSON management command",
 				"command", mgmtOpTxnRead, "for pod", lastPodName, "IP address", lastPodIP)
 			return reconcile.Result{}, err
 		}
 		res, err = httpDigestPostWithJSON(managementURL, username, password, opTxnRead)
 		if err != nil {
-			reqLogger.Error(err, "Failed to process management operation for HTTP response", res)
+			reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
 			return reconcile.Result{}, err
 		}
 		defer res.Body.Close()
 		jsonBody, err = decodeJSONBody(res)
 		if err != nil {
-			reqLogger.Error(err, "Cannot decode JSON body from HTTP response", res)
+			reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
 			return reconcile.Result{}, err
 		}
 		if !isMgmtOutcomeSuccesful(res, jsonBody) {
@@ -309,7 +304,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.", "Transaction list", txnMap)
 			isRequeue = true
 		}
-		commandResult, err := wildflyutil.ExecRemote(lastPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null")
+		commandResult, err := wildflyutil.ExecRemote(lastPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null || true")
 		if err != nil {
 			reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "pod name", lastPodName)
 			return reconcile.Result{}, err
@@ -467,7 +462,7 @@ func checkUpdate(spec *wildflyv1alpha1.WildFlyServerSpec, statefuleSet *appsv1.S
 func (r *ReconcileWildFlyServer) getPodsForWildFly(w *wildflyv1alpha1.WildFlyServer) (*corev1.PodList, error) {
 	podList := &corev1.PodList{}
 	labelsForWildfly := labelsForWildFly(w)
-	delete(labelsForWildfly, "wildfly.operator.service")
+	delete(labelsForWildfly, labelWildflyOperatorInService)
 	labelSelector := labels.SelectorFromSet(labelsForWildfly)
 	listOps := &client.ListOptions{
 		Namespace:     w.Namespace,
@@ -497,6 +492,7 @@ func matches(container *v1.Container, envVar corev1.EnvVar) bool {
 // statefulSetForWildFly returns a wildfly StatefulSet object
 func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFlyServer, txnRecoverySecret *corev1.Secret) *appsv1.StatefulSet {
 	ls := labelsForWildFly(w)
+	delete(ls, labelWildflyOperatorInService)
 	replicas := w.Spec.Size
 	applicationImage := w.Spec.ApplicationImage
 	volumeName := w.Name + "-volume"
@@ -796,7 +792,7 @@ func isMgmtOutcomeSuccesful(res *http.Response, jsonBody map[string]interface{})
 	if res.StatusCode != http.StatusOK {
 		return false
 	}
-	if jsonBody["outcome"] == "succes" {
+	if jsonBody["outcome"] == "success" {
 		return true
 	}
 	return false
@@ -907,7 +903,7 @@ func labelsForWildFly(w *wildflyv1alpha1.WildFlyServer) map[string]string {
 	labels["app.kubernetes.io/name"] = w.Name
 	labels["app.kubernetes.io/managed-by"] = os.Getenv("LABEL_APP_MANAGED_BY")
 	labels["app.openshift.io/runtime"] = os.Getenv("LABEL_APP_RUNTIME")
-	labels["wildfly.operator.service"] = "active"
+	labels[labelWildflyOperatorInService] = "active"
 	if w.Labels != nil {
 		for labelKey, labelValue := range w.Labels {
 			labels[labelKey] = labelValue
