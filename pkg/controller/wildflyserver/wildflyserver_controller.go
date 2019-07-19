@@ -18,9 +18,8 @@ import (
 	"strings"
 	"time"
 
-	httpDigestAuth "github.com/ryanjdew/http-digest-auth-client"
-
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
+	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
 
 	routev1 "github.com/openshift/api/route/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -210,6 +209,9 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			return reconcile.Result{}, err
 		}
 		lastPodIP := wildflyServer.Status.Pods[i].PodIP
+		if strings.Contains(lastPodIP, ":") {
+			lastPodIP = "[" + lastPodIP + "]" // for IPv6
+		}
 		reqLogger.Info("Found ip for the pod ", "podname", lastPodName, "podip", lastPodIP) // TODO: debug?
 
 		// removing the pod from the Service handling
@@ -221,10 +223,10 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 
 		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name) // TODO: debug?
 
-		hostToConnect := fmt.Sprintf("http://%v:%v", lastPodIP, httpManagementPort)
+		managementURL := fmt.Sprintf("http://%v:%v", lastPodIP, httpManagementPort)
 		username := string(foundTxnRecoverySecret.Data["username"])
 		password := string(foundTxnRecoverySecret.Data["password"])
-		reqLogger.Info("Connection to host digest auth", "url", hostToConnect, "username", username, "password", password) // TODO: debug/todelete?
+		reqLogger.Info("Connection to host digest auth", "url", managementURL, "username", username, "password", password) // TODO: debug/todelete?
 
 		// TXN ENABLE RECOVERY LISTENER
 		opEnableRecovery, err := fromJSONToReader(mgmtOpTxnEnableRecoveryListener)
@@ -233,7 +235,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 				"command", mgmtOpTxnEnableRecoveryListener, "for pod", lastPodName, "IP address", lastPodIP)
 			return reconcile.Result{}, err
 		}
-		res, err := httpDigestPostWithJSON(hostToConnect, username, password, opEnableRecovery)
+		res, err := httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
 		if err != nil {
 			reqLogger.Error(err, "Failed to process management operation for HTTP response", res)
 			return reconcile.Result{}, err
@@ -256,7 +258,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 					"command", mgmtOpReload, "for pod", lastPodName, "IP address", lastPodIP)
 				return reconcile.Result{}, err
 			}
-			res, err = httpDigestPostWithJSON(hostToConnect, username, password, opEnableRecovery)
+			res, err = httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
 			if err == nil {
 				defer res.Body.Close()
 			}
@@ -272,18 +274,20 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 				"command", mgmtOpTxnProbe, "for pod", lastPodName, "IP address", lastPodIP)
 			return reconcile.Result{}, err
 		}
-		res, err = httpDigestPostWithJSON(hostToConnect, username, password, opProbe)
+		res, err = httpDigestPostWithJSON(managementURL, username, password, opProbe)
 		if err == nil {
 			defer res.Body.Close()
 		}
 
+		// TXN READ TXNs
+		isRequeue := false
 		opTxnRead, err := fromJSONToReader(mgmtOpTxnRead)
 		if err != nil {
 			reqLogger.Error(err, "Fail to parse JSON management command",
 				"command", mgmtOpTxnRead, "for pod", lastPodName, "IP address", lastPodIP)
 			return reconcile.Result{}, err
 		}
-		res, err = httpDigestPostWithJSON(hostToConnect, username, password, opTxnRead)
+		res, err = httpDigestPostWithJSON(managementURL, username, password, opTxnRead)
 		if err != nil {
 			reqLogger.Error(err, "Failed to process management operation for HTTP response", res)
 			return reconcile.Result{}, err
@@ -302,7 +306,20 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		transactions := jsonBody["result"]
 		txnMap, isMap := transactions.(map[string]interface{})
 		if isMap && len(txnMap) > 0 {
-			// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-5.9.5.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
+			reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.", "Transaction list", txnMap)
+			isRequeue = true
+		}
+		commandResult, err := wildflyutil.ExecRemote(lastPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null")
+		if err != nil {
+			reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "pod name", lastPodName)
+			return reconcile.Result{}, err
+		}
+		if commandResult != "" {
+			reqLogger.Info("Recovery scan to be invoked because of the folder data/ejb-xa-recovery/ is not empty.", "Output listing", commandResult)
+			isRequeue = true
+		}
+		if isRequeue {
+			// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-*.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
 			socketConnect(lastPodIP, recoveryPort, "SCAN")
 			return reconcile.Result{Requeue: true}, nil // success but we need to requeue
 		}
@@ -748,7 +765,7 @@ func httpDigestPostWithJSON(hostname, username, password string, httpJSONData io
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	digestAuth := &httpDigestAuth.DigestHeaders{}
+	digestAuth := &wildflyutil.DigestHeaders{}
 	digestAuth, err = digestAuth.Auth(username, password, hostname)
 	if err != nil {
 		return nil, fmt.Errorf("Fail to authenticate to %s for http WildFly management for username %s, error %v",

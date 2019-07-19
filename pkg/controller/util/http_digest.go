@@ -1,4 +1,7 @@
-package httpDigestAuth
+package util
+
+// forked from "github.com/ryanjdew/http-digest-auth-client"
+// TODO: needs to be checked if possible or write own tooling
 
 import (
 	"crypto/md5"
@@ -6,7 +9,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -103,11 +105,11 @@ func (d *DigestHeaders) Auth(username string, password string, uri string) (*Dig
 
 	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	if resp.StatusCode == 401 {
 
@@ -133,7 +135,7 @@ func (d *DigestHeaders) Auth(username string, password string, uri string) (*Dig
 		d.ApplyAuth(req)
 		resp, err = client.Do(req)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		if resp.StatusCode != 200 {
 			d = &DigestHeaders{}
