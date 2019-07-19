@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -154,7 +155,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	// TODO: the changed secrete needs to be promoted to the existing pods (or they need to be rescheduled)
+	// TODO: the changed secret needs to be promoted to the existing pods (or they need to be rescheduled)
 	// Define secret jboss cli connection for txn recovery processing
 	foundTxnRecoverySecret := &v1.Secret{}
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: getTxnRecoverySecretName(wildflyServer), Namespace: wildflyServer.Namespace}, foundTxnRecoverySecret)
@@ -199,125 +200,148 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 	// TODO: do not enter the scaledown handling if the pod was already cleaned from transactions, use the pod status to check
 	wildflyServerSpecSize := wildflyServer.Spec.Size
-	if len(podList.Items) > int(wildflyServerSpecSize) {
+	numberOfPodsToScaleDown := len(podList.Items) - int(wildflyServerSpecSize)
+	scaleDownPodsState := make(map[string]string) // pod name - state
+	scaleDownErrors := []error{}
+	for scaleDownIndex := 1; scaleDownIndex <= numberOfPodsToScaleDown; scaleDownIndex++ {
 		// scaledown scenario, need to handle transction recovery
-		lastPod := podList.Items[len(podList.Items)-1]
-		lastPodName := lastPod.ObjectMeta.Name
-		lastPodIP := lastPod.Status.PodIP
-		if strings.Contains(lastPodIP, ":") {
-			lastPodIP = "[" + lastPodIP + "]" // for IPv6
+		scaleDownPod := podList.Items[len(podList.Items)-scaleDownIndex]
+		scaleDownPodName := scaleDownPod.ObjectMeta.Name
+		scaleDownPodIP := scaleDownPod.Status.PodIP
+		if strings.Contains(scaleDownPodIP, ":") {
+			scaleDownPodIP = "[" + scaleDownPodIP + "]" // for IPv6
 		}
-		reqLogger.Info("Found ip for the pod ", "podname", lastPodName, "podip", lastPodIP) // TODO: debug?
+		reqLogger.Info("Found ip for the pod ", "podname", scaleDownPodName, "podip", scaleDownPodIP) // TODO: debug?
 
-		// removing the pod from the Service handling
-		lastPod.ObjectMeta.Labels[labelWildflyOperatorInService] = "under-scale-down-processing"
-		if err = r.client.Update(context.TODO(), &lastPod); err != nil {
-			reqLogger.Error(err, "Failed to update pod labels", "Pod name", lastPod.ObjectMeta.Name, " with labels ", lastPod.ObjectMeta.Labels)
-			return reconcile.Result{}, err
+		// setting-up the pod status
+		wildflyServerSpecPodStatus := getWildflyServerPodStatusByName(wildflyServer, scaleDownPodName)
+		if wildflyServerSpecPodStatus != nil {
+			scaleDownPodsState[scaleDownPodName] = wildflyServerSpecPodStatus.State
+		} else {
+			scaleDownPodsState[scaleDownPodName] = wildflyv1alpha1.PodStateScalingDownDirty
 		}
 
-		reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", lastPod.ObjectMeta.Name) // TODO: debug?
+		if wildflyServerSpecPodStatus.State != wildflyv1alpha1.PodStateScalingDownClean {
+			// removing the pod from the Service handling
+			scaleDownPod.ObjectMeta.Labels[labelWildflyOperatorInService] = "under-scale-down-processing"
+			if err = r.client.Update(context.TODO(), &scaleDownPod); err != nil {
+				reqLogger.Error(err, "Failed to update pod labels", "Pod name", scaleDownPod.ObjectMeta.Name, " with labels ", scaleDownPod.ObjectMeta.Labels)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
+			}
 
-		managementURL := fmt.Sprintf("http://%v:%v/management", lastPodIP, httpManagementPort)
-		username := string(foundTxnRecoverySecret.Data["username"])
-		password := string(foundTxnRecoverySecret.Data["password"])
-		reqLogger.Info("Connection to host digest auth", "url", managementURL, "username", username, "password", password) // TODO: debug/todelete?
+			reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", scaleDownPod.ObjectMeta.Name) // TODO: debug?
 
-		// TXN ENABLE RECOVERY LISTENER
-		opEnableRecovery, err := fromJSONToReader(mgmtOpTxnEnableRecoveryListener)
-		if err != nil {
-			reqLogger.Error(err, "Fail to parse JSON management command",
-				"command", mgmtOpTxnEnableRecoveryListener, "for pod", lastPodName, "IP address", lastPodIP)
-			return reconcile.Result{}, err
-		}
-		res, err := httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
-		if err != nil {
-			reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
-			return reconcile.Result{}, err
-		}
-		defer res.Body.Close()
-		jsonBody, err := decodeJSONBody(res)
-		if err != nil {
-			reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
-			return reconcile.Result{}, err
-		}
-		if !isMgmtOutcomeSuccesful(res, jsonBody) {
-			reqLogger.Info("Failed to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res)
-		}
-		// enabling the recovery listner requires reload if not already set
-		isReloadRequires := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
-		if isReloadRequires == "true" {
-			opEnableRecovery, err := fromJSONToReader(mgmtOpReload)
+			managementURL := fmt.Sprintf("http://%v:%v/management", scaleDownPodIP, httpManagementPort)
+			username := string(foundTxnRecoverySecret.Data["username"])
+			password := string(foundTxnRecoverySecret.Data["password"])
+			reqLogger.Info("Connection to host digest auth", "url", managementURL, "username", username, "password", password) // TODO: debug/todelete?
+
+			// TXN ENABLE RECOVERY LISTENER
+			opEnableRecovery, err := fromJSONToReader(mgmtOpTxnEnableRecoveryListener)
 			if err != nil {
-				reqLogger.Error(err, "Failed to parse JSON management command",
-					"command", mgmtOpReload, "for pod", lastPodName, "IP address", lastPodIP)
+				reqLogger.Error(err, "Fail to parse JSON management command",
+					"command", mgmtOpTxnEnableRecoveryListener, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
 				return reconcile.Result{}, err
 			}
-			res, err = httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
+			res, err := httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
+			if err != nil {
+				reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
+				return reconcile.Result{}, err
+			}
+			defer res.Body.Close()
+			jsonBody, err := decodeJSONBody(res)
+			if err != nil {
+				reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
+				return reconcile.Result{}, err
+			}
+			if !isMgmtOutcomeSuccesful(res, jsonBody) {
+				reqLogger.Info("Failed to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res)
+			}
+			// enabling the recovery listner requires reload if not already set
+			isReloadRequires := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
+			if isReloadRequires == "true" {
+				opEnableRecovery, err := fromJSONToReader(mgmtOpReload)
+				if err != nil {
+					reqLogger.Error(err, "Failed to parse JSON management command",
+						"command", mgmtOpReload, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
+					return reconcile.Result{}, err
+				}
+				res, err = httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
+				if err == nil {
+					defer res.Body.Close()
+				}
+				return reconcile.Result{Requeue: true}, nil
+			}
+
+			// TXN PROBE
+			// pod is still available for remote command execution as it's running
+			// _, err = wildflyutil.ExecRemote(scaleDownPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
+			opProbe, err := fromJSONToReader(mgmtOpTxnProbe)
+			if err != nil {
+				reqLogger.Error(err, "Failed to parse JSON management command",
+					"command", mgmtOpTxnProbe, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
+				return reconcile.Result{}, err
+			}
+			res, err = httpDigestPostWithJSON(managementURL, username, password, opProbe)
 			if err == nil {
 				defer res.Body.Close()
 			}
-			return reconcile.Result{Requeue: true}, nil
-		}
 
-		// TXN PROBE
-		// pod is still available for remote command execution as it's running
-		// _, err = wildflyutil.ExecRemote(lastPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
-		opProbe, err := fromJSONToReader(mgmtOpTxnProbe)
-		if err != nil {
-			reqLogger.Error(err, "Failed to parse JSON management command",
-				"command", mgmtOpTxnProbe, "for pod", lastPodName, "IP address", lastPodIP)
-			return reconcile.Result{}, err
-		}
-		res, err = httpDigestPostWithJSON(managementURL, username, password, opProbe)
-		if err == nil {
+			// TXN READ TXNs
+			isForScan := false
+			opTxnRead, err := fromJSONToReader(mgmtOpTxnRead)
+			if err != nil {
+				reqLogger.Error(err, "Failed to parse JSON management command",
+					"command", mgmtOpTxnRead, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
+				return reconcile.Result{}, err
+			}
+			res, err = httpDigestPostWithJSON(managementURL, username, password, opTxnRead)
+			if err != nil {
+				reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
+				return reconcile.Result{}, err
+			}
 			defer res.Body.Close()
+			jsonBody, err = decodeJSONBody(res)
+			if err != nil {
+				reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
+				return reconcile.Result{}, err
+			}
+			if !isMgmtOutcomeSuccesful(res, jsonBody) {
+				err = fmt.Errorf("Cannot get list of the in-doubt transactions at pod %v for transaction scaledown", scaleDownPodName)
+				reqLogger.Error(err, "Failure on transaction scaledown", "HTTP response", res)
+				return reconcile.Result{}, err
+			}
+			transactions := jsonBody["result"]
+			txnMap, isMap := transactions.(map[string]interface{})
+			if isMap && len(txnMap) > 0 {
+				reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.", "Transaction list", txnMap)
+				isForScan = true
+			}
+			commandResult, err := wildflyutil.ExecRemote(scaleDownPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null || true")
+			if err != nil {
+				reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "pod name", scaleDownPodName)
+				return reconcile.Result{}, err
+			}
+			if commandResult != "" {
+				reqLogger.Info("Recovery scan to be invoked because of the folder data/ejb-xa-recovery/ is not empty.", "Output listing", commandResult)
+				isForScan = true
+			}
+			if isForScan {
+				// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-*.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
+				socketConnect(scaleDownPodIP, recoveryPort, "SCAN")
+				scaleDownPodsState[scaleDownPodName] = wildflyv1alpha1.PodStateScalingDownDirty
+			} else {
+				// no data in object store this pod is clean to go
+				scaleDownPodsState[scaleDownPodName] = wildflyv1alpha1.PodStateScalingDownClean
+			}
 		}
-
-		// TXN READ TXNs
-		isRequeue := false
-		opTxnRead, err := fromJSONToReader(mgmtOpTxnRead)
-		if err != nil {
-			reqLogger.Error(err, "Failed to parse JSON management command",
-				"command", mgmtOpTxnRead, "for pod", lastPodName, "IP address", lastPodIP)
-			return reconcile.Result{}, err
-		}
-		res, err = httpDigestPostWithJSON(managementURL, username, password, opTxnRead)
-		if err != nil {
-			reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
-			return reconcile.Result{}, err
-		}
-		defer res.Body.Close()
-		jsonBody, err = decodeJSONBody(res)
-		if err != nil {
-			reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
-			return reconcile.Result{}, err
-		}
-		if !isMgmtOutcomeSuccesful(res, jsonBody) {
-			err = fmt.Errorf("Cannot get list of the in-doubt transactions at pod %v for transaction scaledown", lastPodName)
-			reqLogger.Error(err, "Failure on transaction scaledown", "HTTP response", res)
-			return reconcile.Result{}, err
-		}
-		transactions := jsonBody["result"]
-		txnMap, isMap := transactions.(map[string]interface{})
-		if isMap && len(txnMap) > 0 {
-			reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.", "Transaction list", txnMap)
-			isRequeue = true
-		}
-		commandResult, err := wildflyutil.ExecRemote(lastPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null || true")
-		if err != nil {
-			reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "pod name", lastPodName)
-			return reconcile.Result{}, err
-		}
-		if commandResult != "" {
-			reqLogger.Info("Recovery scan to be invoked because of the folder data/ejb-xa-recovery/ is not empty.", "Output listing", commandResult)
-			isRequeue = true
-		}
-		if isRequeue {
-			// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-*.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
-			socketConnect(lastPodIP, recoveryPort, "SCAN")
-			return reconcile.Result{Requeue: true}, nil // success but we need to requeue
-		}
+	}
+	if len(scaleDownErrors) > 0 {
+		return reconcile.Result{}, scaleDownErrors[0]
+	}
+	if containsValue(&scaleDownPodsState, wildflyv1alpha1.PodStateScalingDownDirty) {
+		return reconcile.Result{Requeue: true}, nil // success but we need to requeue
 	}
 
 	// check if the stateful set is up to date with the WildFlyServerSpec
@@ -400,6 +424,13 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			wildflyServer.Status.Hosts = hosts
 			reqLogger.Info("Updating hosts", "WildFlyServer", wildflyServer)
 		}
+	}
+
+	// TODO: here is wrong
+	// Update Wildfly Server scale down processing info
+	if wildflyServer.Status.ScalingdownPods != int32(numberOfPodsToScaleDown) {
+		update = true
+		wildflyServer.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
 	}
 
 	// Update WildFly Server pod status
@@ -726,6 +757,23 @@ func (r *ReconcileWildFlyServer) txnRecoveryJBossCliPasswordSecret(w *wildflyv1a
 	// Set WildFlyServer instance as the owner and controller
 	controllerutil.SetControllerReference(w, secret, r.scheme)
 	return secret
+}
+
+func getWildflyServerPodStatusByName(w *wildflyv1alpha1.WildFlyServer, podName string) *wildflyv1alpha1.PodStatus {
+	i := sort.Search(len(w.Status.Pods), func(i int) bool { return podName == w.Status.Pods[i].Name })
+	if i < 0 || i >= len(w.Status.Pods) || podName != w.Status.Pods[i].Name {
+		return nil
+	}
+	return &w.Status.Pods[i]
+}
+
+func containsValue(m *map[string]string, v string) bool {
+	for _, x := range *m {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func getTxnRecoverySecretName(w *wildflyv1alpha1.WildFlyServer) string {
