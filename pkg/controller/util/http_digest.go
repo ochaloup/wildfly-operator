@@ -1,7 +1,7 @@
 package util
 
 // forked from "github.com/ryanjdew/http-digest-auth-client"
-// TODO: needs to be checked if possible or write own tooling
+// TODO: needs to be checked if possible or we need to write own tooling
 
 import (
 	"crypto/md5"

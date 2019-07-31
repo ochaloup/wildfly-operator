@@ -1,8 +1,10 @@
 package util
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"net"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -70,4 +72,21 @@ func ExecRemote(pod corev1.Pod, command string) (string, error) {
 		return "", fmt.Errorf("command execution '%v' got stderr: %v", command, execErr.String())
 	}
 	return execOut.String(), nil
+}
+
+// SocketConnect send a command (a string) to the defined hostname and port
+//  where it connects to with 'net.Dial' tcp connection
+func SocketConnect(hostname string, port int32, command string) (string, error) {
+	// connect to socket
+	toConnectTo := fmt.Sprintf("%v:%v", hostname, port)
+	conn, _ := net.Dial("tcp", toConnectTo)
+	// send to socket
+	fmt.Fprintf(conn, command+"\n")
+	// blocking operation, listen for reply
+	message, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("Error to get response for command %s sending to %s:%v, error: %v",
+			command, hostname, port, err)
+	}
+	return message, nil
 }

@@ -1,7 +1,6 @@
 package wildflyserver
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -9,10 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,8 +47,10 @@ const (
 	httpManagementPort            int32 = 9990
 	recoveryPort                  int32 = 4712
 	standaloneServerDataDirPath         = "/wildfly/standalone/data"
+	wftcDataDirName                     = "ejb-xa-recovery"
 	wflyMgmtTxnRecoveryUserName         = "transaction.recovery.scaledown"
 	labelWildflyOperatorInService       = "wildfly.operator.in.service"
+	txnRecoveryScanCommand              = "SCAN"
 )
 
 var (
@@ -155,28 +156,45 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	// TODO: the changed secret needs to be promoted to the existing pods (or they need to be rescheduled)
+	var statefulSetDoesNotExists bool
+	foundStatefulSet := &appsv1.StatefulSet{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: wildflyServer.Name, Namespace: wildflyServer.Namespace}, foundStatefulSet)
+	if err != nil && errors.IsNotFound(err) {
+		statefulSetDoesNotExists = true
+	} else if err != nil {
+		reqLogger.Error(err, "Failed to get StatefulSet.")
+		return reconcile.Result{}, err
+	} else {
+		statefulSetDoesNotExists = false
+	}
+
 	// Define secret jboss cli connection for txn recovery processing
 	foundTxnRecoverySecret := &v1.Secret{}
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: getTxnRecoverySecretName(wildflyServer), Namespace: wildflyServer.Namespace}, foundTxnRecoverySecret)
 	if err != nil && errors.IsNotFound(err) {
+		// new secret is to be created, if there is an existing statefulset it has to be removed as it refers to the old secret
+		if !statefulSetDoesNotExists {
+			err = r.client.Delete(context.TODO(), foundStatefulSet)
+			if err != nil {
+				reqLogger.Error(err, "Cannot delete stateful set while creating a new Secret")
+				return reconcile.Result{}, err
+			}
+		}
+		// creating new secret for connection to server during scaledown to run transaction recovery
 		txnRecoverySecret := r.txnRecoveryJBossCliPasswordSecret(wildflyServer)
-		err = r.client.Create(context.TODO(), txnRecoverySecret)
-		if err != nil {
+		if err = r.client.Create(context.TODO(), txnRecoverySecret); err != nil {
 			reqLogger.Error(err, "Failed to create Secret necessary for txn recovery.", "Secret.Namespace", txnRecoverySecret.Namespace, "Secret.Name", txnRecoverySecret.Name)
 			return reconcile.Result{}, err
 		}
-		// Secret created successfully - return and requeue
+		// scaledown transaction recovery secret created successfully - return and requeue
 		return reconcile.Result{Requeue: true}, nil
 	} else if err != nil {
 		reqLogger.Error(err, "Failed to get Secret.", "txn recovery secret name", getTxnRecoverySecretName(wildflyServer))
 		return reconcile.Result{}, err
 	}
 
-	// Check if the statefulSet already exists, if not create a new one
-	foundStatefulSet := &appsv1.StatefulSet{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: wildflyServer.Name, Namespace: wildflyServer.Namespace}, foundStatefulSet)
-	if err != nil && errors.IsNotFound(err) {
+	// StatefulSet does not yet exists, creating a new one
+	if statefulSetDoesNotExists {
 		// Define a new statefulSet
 		statefulSet := r.statefulSetForWildFly(wildflyServer, foundTxnRecoverySecret)
 		reqLogger.Info("Creating a new StatefulSet.", "StatefulSet.Namespace", statefulSet.Namespace, "StatefulSet.Name", statefulSet.Name)
@@ -187,9 +205,6 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 		// StatefulSet created successfully - return and requeue
 		return reconcile.Result{Requeue: true}, nil
-	} else if err != nil {
-		reqLogger.Error(err, "Failed to get StatefulSet.")
-		return reconcile.Result{}, err
 	}
 
 	// check WildFlyServerSpec if it's about to be scaled down
@@ -198,20 +213,18 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		reqLogger.Error(err, "Failed to list pods.", "WildFlyServer.Namespace", wildflyServer.Namespace, "WildFlyServer.Name", wildflyServer.Name)
 		return reconcile.Result{}, err
 	}
-	// TODO: do not enter the scaledown handling if the pod was already cleaned from transactions, use the pod status to check
 	wildflyServerSpecSize := wildflyServer.Spec.Size
-	numberOfPodsToScaleDown := len(podList.Items) - int(wildflyServerSpecSize)
-	scaleDownPodsState := make(map[string]string) // pod name - state
-	scaleDownErrors := []error{}
+	numberOfPodsToScaleDown := len(podList.Items) - int(wildflyServerSpecSize) // difference between desired pod count and the current number of pod instances
+	scaleDownPodsState := make(map[string]string)                              // map referring to: pod name - pod state
+	scaleDownErrors := []error{}                                               // errors occured during processing the scaledown for the pods
 	for scaleDownIndex := 1; scaleDownIndex <= numberOfPodsToScaleDown; scaleDownIndex++ {
 		// scaledown scenario, need to handle transction recovery
 		scaleDownPod := podList.Items[len(podList.Items)-scaleDownIndex]
 		scaleDownPodName := scaleDownPod.ObjectMeta.Name
 		scaleDownPodIP := scaleDownPod.Status.PodIP
-		if strings.Contains(scaleDownPodIP, ":") {
+		if strings.Contains(scaleDownPodIP, ":") && !strings.HasPrefix(scaleDownPodIP, "[") {
 			scaleDownPodIP = "[" + scaleDownPodIP + "]" // for IPv6
 		}
-		reqLogger.Info("Found ip for the pod ", "podname", scaleDownPodName, "podip", scaleDownPodIP) // TODO: debug?
 
 		// setting-up the pod status
 		wildflyServerSpecPodStatus := getWildflyServerPodStatusByName(wildflyServer, scaleDownPodName)
@@ -230,42 +243,45 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 				break
 			}
 
-			reqLogger.Info(">>>>> Going for scaledown with pod ", "pod name", scaleDownPod.ObjectMeta.Name) // TODO: debug?
+			reqLogger.Info("Going for scaledown with pod", "pod name", scaleDownPod.ObjectMeta.Name, "pod ip", scaleDownPodIP)
 
 			managementURL := fmt.Sprintf("http://%v:%v/management", scaleDownPodIP, httpManagementPort)
 			username := string(foundTxnRecoverySecret.Data["username"])
 			password := string(foundTxnRecoverySecret.Data["password"])
-			reqLogger.Info("Connection to host digest auth", "url", managementURL, "username", username, "password", password) // TODO: debug/todelete?
 
-			// TXN ENABLE RECOVERY LISTENER
+			// enabling recovery listener to speed up recovery processing
 			opEnableRecovery, err := fromJSONToReader(mgmtOpTxnEnableRecoveryListener)
 			if err != nil {
 				reqLogger.Error(err, "Fail to parse JSON management command",
 					"command", mgmtOpTxnEnableRecoveryListener, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
-				return reconcile.Result{}, err
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			res, err := httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
 			if err != nil {
-				reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Failed to process management operation", "Pod name", scaleDownPod, "HTTP response", res)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			defer res.Body.Close()
 			jsonBody, err := decodeJSONBody(res)
 			if err != nil {
-				reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Cannot decode JSON body", "Pod name", scaleDownPod, "HTTP response", res)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			if !isMgmtOutcomeSuccesful(res, jsonBody) {
 				reqLogger.Info("Failed to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res)
 			}
 			// enabling the recovery listner requires reload if not already set
-			isReloadRequires := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
-			if isReloadRequires == "true" {
+			isReloadRequired := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
+			if isReloadRequired == "true" {
 				opEnableRecovery, err := fromJSONToReader(mgmtOpReload)
 				if err != nil {
 					reqLogger.Error(err, "Failed to parse JSON management command",
 						"command", mgmtOpReload, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
-					return reconcile.Result{}, err
+					scaleDownErrors = append(scaleDownErrors, err)
+					break
 				}
 				res, err = httpDigestPostWithJSON(managementURL, username, password, opEnableRecovery)
 				if err == nil {
@@ -274,62 +290,71 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 				return reconcile.Result{Requeue: true}, nil
 			}
 
-			// TXN PROBE
-			// pod is still available for remote command execution as it's running
+			// probing transaction log to verify there is not in-doubt transaction in the log
 			// _, err = wildflyutil.ExecRemote(scaleDownPod, "/opt/jboss/wildfly/bin/jboss-cli.sh -c --command='/subsystem=transactions/log-store=log-store:probe()'")
 			opProbe, err := fromJSONToReader(mgmtOpTxnProbe)
 			if err != nil {
 				reqLogger.Error(err, "Failed to parse JSON management command",
-					"command", mgmtOpTxnProbe, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
-				return reconcile.Result{}, err
+					"command", mgmtOpTxnProbe, "Pod name", scaleDownPodName, "IP address", scaleDownPodIP)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			res, err = httpDigestPostWithJSON(managementURL, username, password, opProbe)
 			if err == nil {
 				defer res.Body.Close()
 			}
 
-			// TXN READ TXNs
+			// transaction log was probed, now we read the set of transactions which are in-doubt
 			isForScan := false
 			opTxnRead, err := fromJSONToReader(mgmtOpTxnRead)
 			if err != nil {
 				reqLogger.Error(err, "Failed to parse JSON management command",
-					"command", mgmtOpTxnRead, "for pod", scaleDownPodName, "IP address", scaleDownPodIP)
-				return reconcile.Result{}, err
+					"command", mgmtOpTxnRead, "Pod name", scaleDownPodName, "IP address", scaleDownPodIP)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			res, err = httpDigestPostWithJSON(managementURL, username, password, opTxnRead)
 			if err != nil {
-				reqLogger.Error(err, "Failed to process management operation", "HTTP response", res)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Failed to process management operation", "Pod name", scaleDownPodName, "HTTP response", res)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			defer res.Body.Close()
 			jsonBody, err = decodeJSONBody(res)
 			if err != nil {
-				reqLogger.Error(err, "Cannot decode JSON body", "HTTP response", res)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Cannot decode JSON body", "Pod name", scaleDownPodName, "HTTP response", res)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			if !isMgmtOutcomeSuccesful(res, jsonBody) {
 				err = fmt.Errorf("Cannot get list of the in-doubt transactions at pod %v for transaction scaledown", scaleDownPodName)
-				reqLogger.Error(err, "Failure on transaction scaledown", "HTTP response", res)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Failure on transaction scaledown", "Pod name", scaleDownPodName, "HTTP response", res)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			transactions := jsonBody["result"]
 			txnMap, isMap := transactions.(map[string]interface{})
 			if isMap && len(txnMap) > 0 {
-				reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.", "Transaction list", txnMap)
+				reqLogger.Info("Recovery scan to be invoked as the transaction log storage is not empty.",
+					"Pod name", scaleDownPodName, "Transaction list", txnMap)
 				isForScan = true
 			}
-			commandResult, err := wildflyutil.ExecRemote(scaleDownPod, "ls \""+standaloneServerDataDirPath+"/ejb-xa-recovery/\" 2> /dev/null || true")
+			lsCommand := fmt.Sprintf(`ls %s/%s/ 2> /dev/null || true`, standaloneServerDataDirPath, wftcDataDirName)
+			commandResult, err := wildflyutil.ExecRemote(scaleDownPod, lsCommand)
 			if err != nil {
-				reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "pod name", scaleDownPodName)
-				return reconcile.Result{}, err
+				reqLogger.Error(err, "Cannot query filesystem to check existing remote transactions", "Pod name", scaleDownPodName)
+				scaleDownErrors = append(scaleDownErrors, err)
+				break
 			}
 			if commandResult != "" {
-				reqLogger.Info("Recovery scan to be invoked because of the folder data/ejb-xa-recovery/ is not empty.", "Output listing", commandResult)
+				reqLogger.Info("Recovery scan to be invoked because of the WFTC data dir is not empty.",
+					"WFTC data dir path", standaloneServerDataDirPath+"/"+wftcDataDirName, "Output listing", commandResult)
 				isForScan = true
 			}
+			// WFLY still manages in-flight transactions, let's force the recovery scan
 			if isForScan {
 				// java -cp /opt/jboss/wildfly/modules/system/layers/base/org/jboss/jts/main/narayana-jts-idlj-*.Final.jar com.arjuna.ats.arjuna.tools.RecoveryMonitor -host quickstart-0 -port 4712 -timeout 18000
-				socketConnect(scaleDownPodIP, recoveryPort, "SCAN")
+				wildflyutil.SocketConnect(scaleDownPodIP, recoveryPort, txnRecoveryScanCommand)
 				scaleDownPodsState[scaleDownPodName] = wildflyv1alpha1.PodStateScalingDownDirty
 			} else {
 				// no data in object store this pod is clean to go
@@ -337,11 +362,29 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			}
 		}
 	}
+	if numberOfPodsToScaleDown > 0 {
+		// updating the pod state based on the recovery processing
+		for _, v := range wildflyServer.Status.Pods {
+			if podStateValue, exist := scaleDownPodsState[v.Name]; exist {
+				v.State = podStateValue
+			}
+			wildflyServer.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
+		}
+		if err := r.client.Status().Update(context.Background(), wildflyServer); err != nil {
+			reqLogger.Error(err, "Failed to update pods in WildFlyServer status during transaction recovery scale down processing")
+		}
+	}
+	// error happened during recovery processing, reporting it and requeue
 	if len(scaleDownErrors) > 0 {
-		return reconcile.Result{}, scaleDownErrors[0]
+		var errStrings = ""
+		for _, v := range scaleDownErrors {
+			errStrings += "- " + v.Error() + "\n"
+		}
+		return reconcile.Result{}, fmt.Errorf("Found %v errors:\n%s", len(scaleDownErrors), errStrings)
 	}
 	if containsValue(&scaleDownPodsState, wildflyv1alpha1.PodStateScalingDownDirty) {
-		return reconcile.Result{Requeue: true}, nil // success but we need to requeue
+		// success but we need to requeue, there is still a pod which contains in-doubt transactions
+		return reconcile.Result{Requeue: true}, nil
 	}
 
 	// check if the stateful set is up to date with the WildFlyServerSpec
@@ -426,7 +469,6 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		}
 	}
 
-	// TODO: here is wrong
 	// Update Wildfly Server scale down processing info
 	if wildflyServer.Status.ScalingdownPods != int32(numberOfPodsToScaleDown) {
 		update = true
@@ -434,7 +476,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 
 	// Update WildFly Server pod status
-	requeue, podsStatus := getPodStatus(podList.Items)
+	requeue, podsStatus := getPodStatus(podList.Items, wildflyServer.Status.Pods)
 	if !reflect.DeepEqual(podsStatus, wildflyServer.Status.Pods) {
 		update = true
 		wildflyServer.Status.Pods = podsStatus
@@ -500,6 +542,31 @@ func (r *ReconcileWildFlyServer) getPodsForWildFly(w *wildflyv1alpha1.WildFlySer
 		LabelSelector: labelSelector,
 	}
 	err := r.client.List(context.TODO(), listOps, podList)
+
+	// sorting pods by number in the name
+	if err == nil {
+		pattern := regexp.MustCompile(`[0-9]+$`)
+		sort.SliceStable(podList.Items, func(i, j int) bool {
+			reOut1 := pattern.FindStringSubmatch(podList.Items[i].ObjectMeta.Name)
+			if reOut1 == nil {
+				return false
+			}
+			number1, err := strconv.Atoi(reOut1[0])
+			if err != nil {
+				return false
+			}
+			reOut2 := pattern.FindStringSubmatch(podList.Items[j].ObjectMeta.Name)
+			if reOut2 == nil {
+				return false
+			}
+			number2, err := strconv.Atoi(reOut2[0])
+			if err != nil {
+				return false
+			}
+
+			return number1 < number2
+		})
+	}
 	return podList, err
 }
 
@@ -542,8 +609,9 @@ func (r *ReconcileWildFlyServer) statefulSetForWildFly(w *wildflyv1alpha1.WildFl
 			Labels:    ls,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas:    &replicas,
-			ServiceName: loadBalancerServiceName(w),
+			Replicas:            &replicas,
+			ServiceName:         loadBalancerServiceName(w),
+			PodManagementPolicy: appsv1.ParallelPodManagement, // TODO: is it fine to change for Parralel?
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
@@ -868,35 +936,29 @@ func getJSONDataByIndex(json interface{}, indexes ...string) string {
 	}
 }
 
-func socketConnect(hostname string, port int32, command string) (string, error) {
-	// connect to socket
-	toConnectTo := fmt.Sprintf("%v:%v", hostname, port)
-	conn, _ := net.Dial("tcp", toConnectTo)
-	// send to socket
-	fmt.Fprintf(conn, command+"\n")
-	// blocking operation, listen for reply
-	message, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("Error to get response for command %s sending to %s:%v, error: %v",
-			command, hostname, port, err)
-	}
-	return message, nil
-}
-
 // getPodStatus returns the pod names of the array of pods passed in
-func getPodStatus(pods []corev1.Pod) (bool, []wildflyv1alpha1.PodStatus) {
+func getPodStatus(pods []corev1.Pod, originalPodStatuses []wildflyv1alpha1.PodStatus) (bool, []wildflyv1alpha1.PodStatus) {
 	var requeue = false
-	var podStatus []wildflyv1alpha1.PodStatus
+	var podStatuses []wildflyv1alpha1.PodStatus
+	podStatusesOriginalMap := make(map[string]wildflyv1alpha1.PodStatus)
+	for _, v := range originalPodStatuses {
+		podStatusesOriginalMap[v.Name] = v
+	}
 	for _, pod := range pods {
-		podStatus = append(podStatus, wildflyv1alpha1.PodStatus{
+		podState := wildflyv1alpha1.PodStateActive
+		if value, exists := podStatusesOriginalMap[pod.Name]; exists {
+			podState = value.State
+		}
+		podStatuses = append(podStatuses, wildflyv1alpha1.PodStatus{
 			Name:  pod.Name,
 			PodIP: pod.Status.PodIP,
+			State: podState,
 		})
 		if pod.Status.PodIP == "" {
 			requeue = true
 		}
 	}
-	return requeue, podStatus
+	return requeue, podStatuses
 }
 
 // createLivenessProbe create a Exec probe if the SERVER_LIVENESS_SCRIPT env var is present.

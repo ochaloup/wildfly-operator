@@ -45,7 +45,7 @@ type WildFlyServerStatus struct {
 	Pods  []PodStatus `json:"pods,omitempty"`
 	Hosts []string    `json:"hosts,omitempty"`
 	// Represents the number of pods which are in scaledown process
-	// which particular pod is scaling down can be verified by PodStatus
+	// what particular pod is scaling down can be verified by PodStatus
 	ScalingdownPods int32 `json:"scalingdownPods"`
 }
 
@@ -61,7 +61,7 @@ const (
 	// PodStateScalingDownClean represents the PodStatus.State when pod is not active to serve requests
 	// it's in state of scaling down and it's clean
 	// 'clean' means it's ready to be removed from the kubernetes cluster
-	PodStateScalingDownClean = "SCALE_DOWN_DIRTY"
+	PodStateScalingDownClean = "SCALE_DOWN_CLEAN"
 )
 
 // PodStatus defines the observed state of pods running the WildFlyServer application
@@ -69,7 +69,7 @@ const (
 type PodStatus struct {
 	Name  string `json:"name"`
 	PodIP string `json:"podIP"`
-	// Represent the state the Pod is currently in
+	// Represent the state of the Pod, it's used especially during scale down
 	// the expected values are represented by the PodState* constants
 	State string `json:"state"`
 }
