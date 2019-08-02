@@ -240,8 +240,6 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			scaleDownPodsState[scaleDownPodName] = wildflyv1alpha1.PodStateScalingDownDirty
 		}
 
-		reqLogger.Info("Pod status state is about to be checked", "Pod name", scaleDownPodName, "Pod status original", wildflyServerSpecPodStatus,
-			"Pod status new", scaleDownPodsState[scaleDownPodName])
 		if wildflyServerSpecPodStatus.State != wildflyv1alpha1.PodStateScalingDownClean {
 			// removing the pod from the Service handling
 			scaleDownPod.ObjectMeta.Labels[labelWildflyOperatorInService] = "under-scale-down-processing"
@@ -281,7 +279,6 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			if !isMgmtOutcomeSuccesful(res, jsonBody) {
 				reqLogger.Info("Failed to enable transaction recovery listener. Scaledown processing can take longer", "HTTP response", res, "JSON response", jsonBody)
 			}
-			reqLogger.Info(">>>>>>>> Output of the listener enablement", "JSON BODY", jsonBody) // TODO: delete me!
 			// enabling the recovery listner requires reload if not already set
 			isReloadRequired := getJSONDataByIndex(jsonBody["response-headers"], "operation-requires-reload")
 			if isReloadRequiredBool, _ := strconv.ParseBool(isReloadRequired); isReloadRequiredBool {
@@ -395,16 +392,8 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 			}
 		}
 		wildflyServer.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
-		reqLogger.Info(">>>>>>> WFLY server state for update", "Wfly server state to update", wildflyServer)
 		if err := r.client.Status().Update(context.Background(), wildflyServer); err != nil && !strings.Contains(err.Error(), "object has been modified") {
 			reqLogger.Error(err, "Failed to update pods in WildFlyServer status during transaction recovery scale down processing")
-		} else { // TODO: delete the whole ELSE...
-			wildflyServerUpdated := &wildflyv1alpha1.WildFlyServer{}
-			err = r.client.Get(context.TODO(), request.NamespacedName, wildflyServerUpdated)
-			if err != nil {
-				reqLogger.Info("Cannot get WFLY server state with updates!!!!")
-			}
-			reqLogger.Info(">>>>>>> Updated WFLY server state", "Wfly server state", wildflyServerUpdated)
 		}
 	}
 	// error happened during recovery processing, reporting it and requeue
