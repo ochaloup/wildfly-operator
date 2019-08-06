@@ -33,6 +33,12 @@ rules:
   verbs:
   - '*'
 - apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - '*'
+- apiGroups:
   - monitoring.coreos.com
   resources:
   - servicemonitors

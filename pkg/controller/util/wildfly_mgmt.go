@@ -48,6 +48,26 @@ var (
 		"recursive":       "true",
 		"include-runtime": "true",
 	}
+	// MgmtOpTxnRecoverySocketBindingRead is a JSON structure for reading name of recovery socket binding
+	MgmtOpTxnRecoverySocketBindingRead = map[string]interface{}{
+		"address": []string{
+			"subsystem", "transactions",
+		},
+		"operation": "read-attribute",
+		"name":      "socket-binding",
+	}
+	// MgmtOpSocketBindingRecoveryPortAddress is a JSON structure for reading recovery port
+	MgmtOpSocketBindingRecoveryPortAddress = []string{
+		"socket-binding-group", "standard-sockets", "socket-binding",
+	}
+	// MgmtOpSocketBindingRecoveryPortRead is a JSON structure for reading recovery port
+	MgmtOpSocketBindingRecoveryPortRead = map[string]interface{}{
+		"address": []string{
+			"socket-binding-group", "standard-sockets", "socket-binding", "txn-recovery-environment",
+		},
+		"operation": "read-attribute",
+		"name":      "port",
+	}
 )
 
 // ConvertJSONToReader converts the provided JSON data (a map)
@@ -126,4 +146,41 @@ func ReadJSONDataByIndex(json interface{}, indexes ...string) string {
 	default:
 		return ""
 	}
+}
+
+// GetTransactionRecoveryPort reads management to find out the recovery port
+func GetTransactionRecoveryPort(httpDigest *HTTPDigest) (int32, error) {
+	jsonResult, err := ExecuteMgmtOp(httpDigest, MgmtOpTxnRecoverySocketBindingRead)
+	if err != nil {
+		return 0, fmt.Errorf("Error on management operation to read transaction recovery socket binding with command %v, error: %v",
+			MgmtOpTxnRecoverySocketBindingRead, err)
+	}
+	if !IsMgmtOutcomeSuccesful(jsonResult) {
+		return 0, fmt.Errorf("Cannot read transaction recovery socket binding. The response on command '%v' was %v",
+			MgmtOpTxnRecoverySocketBindingRead, jsonResult)
+	}
+	nameOfSocketBinding, isString := jsonResult["result"].(string)
+	if !isString {
+		return 0, fmt.Errorf("Cannot parse result from reading transaction recoery socket binding. The result is '%v', from command '%v' of whole JSON result: %v",
+			nameOfSocketBinding, MgmtOpTxnRecoverySocketBindingRead, jsonResult)
+	}
+
+	socketBindingAddress := append(MgmtOpSocketBindingRecoveryPortAddress, nameOfSocketBinding)
+	mgmtOpRecoveryPortRead := MgmtOpSocketBindingRecoveryPortRead
+	mgmtOpRecoveryPortRead["address"] = socketBindingAddress
+	jsonResult, err = ExecuteMgmtOp(httpDigest, mgmtOpRecoveryPortRead)
+	if err != nil {
+		return 0, fmt.Errorf("Error on management operation to read recovery port with command %v, error: %v",
+			mgmtOpRecoveryPortRead, err)
+	}
+	if !IsMgmtOutcomeSuccesful(jsonResult) {
+		return 0, fmt.Errorf("Cannot read recovery port. The response on command '%v' was %v",
+			mgmtOpRecoveryPortRead, jsonResult)
+	}
+	portAsFloat64, isFloat64 := jsonResult["result"].(float64)
+	if !isFloat64 {
+		return 0, fmt.Errorf("Cannot parse result for reading recovery port. The typed result is '%v', from command '%v' of whole JSON result: %v",
+			portAsFloat64, mgmtOpRecoveryPortRead, jsonResult)
+	}
+	return int32(portAsFloat64), nil
 }
