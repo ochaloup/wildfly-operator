@@ -55,11 +55,16 @@ const (
 	// PodStateActive represents PodStatus.State when pod is active to serve requests
 	// it's connected in the Service load balancer
 	PodStateActive = "ACTIVE"
-	// PodStateScalingDownDirty represents the PodStatus.State when pod is not active to serve requests,
-	// it's in state of scaling down and it's dirty
-	// 'dirty' means it's not ready for being removed from the kubernetes cluster
-	// some processing (e.g. transaction recovery) needs to be finished first
-	PodStateScalingDownDirty = "SCALE_DOWN_DIRTY"
+	// PodStateScalingDownRecoveryInvestigation represents the PodStatus.State when pod is not active to serve requests,
+	// it's in state of scaling down and is to be verified if it's dirty and if recovery is needed
+	// as the pod is under recovery verification it can't be immediatelly removed
+	// and it needs to be wait until it's marked as clean to be removed
+	PodStateScalingDownRecoveryInvestigation = "SCALE_DOWN_RECOVERY_INVESTIGATION"
+	// PodStateScalingDownRecoveryInProgress represents the PodStatus.State when pod is not active to serve requests,
+	// and it was marked as recovery is needed - there are some in-doubt transactions.
+	// The app server was restarted with the recovery properties to speed-up recovery nad it's needed to wait
+	// until all ind-doubt transactions are processed.
+	PodStateScalingDownRecoveryInProgress = "SCALE_DOWN_RECOVERY_INPROGRESS"
 	// PodStateScalingDownClean represents the PodStatus.State when pod is not active to serve requests
 	// it's in state of scaling down and it's clean
 	// 'clean' means it's ready to be removed from the kubernetes cluster

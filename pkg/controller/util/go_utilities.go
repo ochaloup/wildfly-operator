@@ -1,11 +1,13 @@
 package util
 
-// ContainsInMap returns true if the map m contains the string v,
-//   otherwise false is returned
-func ContainsInMap(m map[string]string, v string) bool {
+// ContainsInMap returns true if the map m contains at least on of the string
+//   presented as argument `vals`, otherwise false is returned
+func ContainsInMap(m map[string]string, vals ...string) bool {
 	for _, x := range m {
-		if x == v {
-			return true
+		for _, v := range vals {
+			if x == v {
+				return true
+			}
 		}
 	}
 	return false

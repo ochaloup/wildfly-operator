@@ -181,7 +181,11 @@ func WildFlySmokeRecoveryScaledownTest(t *testing.T, applicationTag string) {
 		t.Fatalf("Failed to obtain the WildflyServer resource: %v", err)
 	}
 	if wildflyServer.Spec.Size != 2 {
-		t.Fatalf("The created WildflyServer CRD should be defined with 2 instances but it's %v: %v", wildflyServer.Spec.Size, err)
+		t.Fatalf("The created %s CRD should be defined with 2 instances but it's %v: %v", name, wildflyServer.Spec.Size, err)
+	}
+	// waiting for statefulset to scale to two instances
+	if err = WaitUntilReady(f, t, wildflyServer); err != nil {
+		t.Fatalf("Failed during waiting till %s CRD is updated and ready: %v", name, err)
 	}
 	t.Logf("Application %s is deployed with %d instances\n", name, wildflyServer.Spec.Size)
 
@@ -189,13 +193,13 @@ func WildFlySmokeRecoveryScaledownTest(t *testing.T, applicationTag string) {
 	wildflyServer.Spec.Size = 1
 	err = f.Client.Update(context, wildflyServer)
 	if err != nil {
-		t.Fatalf("Failed to update size of WildflyServer resource by decreasing the spec size: %v", err)
+		t.Fatalf("Failed to update size of %s resource by decreasing the spec size: %v", name, err)
 	}
-	t.Logf("Updated application %s size to %d\n", name, wildflyServer.Spec.Size)
+	t.Logf("Updated application CRD %s size to %d\n", name, wildflyServer.Spec.Size)
 
-	// check that the resource have been updated
+	// check that the resource has been updated
 	if err = WaitUntilReady(f, t, wildflyServer); err != nil {
-		t.Fatalf("Failed during waiting till CRD resource is updated and ready: %v", err)
+		t.Fatalf("Failed during waiting till %s CRD resource is updated and ready: %v", name, err)
 	}
 
 	err = f.Client.Delete(context, wildflyServer)
@@ -213,6 +217,7 @@ func WildFlySmokeRecoveryScaledownTest(t *testing.T, applicationTag string) {
 			t.Logf("Got error when getting statefulset %s: %s", name, err)
 			return false, err
 		}
+		t.Logf("Waiting for statefulset being deleted...")
 		return false, nil
 	})
 	if err != nil {

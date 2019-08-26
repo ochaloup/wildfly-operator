@@ -28,6 +28,12 @@ var (
 	MgmtOpSocketBindingRecoveryPortAddress = "/socket-binding-group=standard-sockets/socket-binding="
 	// MgmtOpSocketBindingRecoveryPortRead is a JBoss CLI command for reading recovery port
 	MgmtOpSocketBindingRecoveryPortRead = ":read-attribute(name=port)"
+	// MgmtOpSystemPropertyRecoveryBackoffPeriod is a JBoss CLI command to set system property of recovery backoff period
+	MgmtOpSystemPropertyRecoveryBackoffPeriod = "/system-property=com.arjuna.ats.arjuna.common.RecoveryEnvironmentBean.recoveryBackoffPeriod:add(value=%s)"
+	// MgmtOpSystemPropertyPeriodicRecoveryPeriod is a JBoss CLI command to set system property of periodic recovery period
+	MgmtOpSystemPropertyPeriodicRecoveryPeriod = "/system-property=com.arjuna.ats.arjuna.common.RecoveryEnvironmentBean.periodicRecoveryPeriod:add(value=%s)"
+	// MgmtOpSystemPropertyOrphanSafetyInterval is a JBoss CLI command to set system property of orphan safety interval
+	MgmtOpSystemPropertyOrphanSafetyInterval = "/system-property=com.arjuna.ats.jta.common.JTAEnvironmentBean.orphanSafetyInterval:add(value=%s)"
 )
 
 // IsMgmtOutcomeSuccesful verifies if the management operation was succcesfull

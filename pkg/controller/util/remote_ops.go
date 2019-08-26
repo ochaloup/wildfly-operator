@@ -25,6 +25,8 @@ var (
 	tailOneLineLogOptions = v1.PodLogOptions{TailLines: &numberOne, Timestamps: true}
 	// regexp searching for timestamp at the start of the string
 	timestampFromLogLine = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[^ ]+`)
+	// start of the time timestamp
+	startOfTheTimeTimestamp = time.Unix(0, 0)
 )
 
 //ExecRemote executes a command inside the remote pod
@@ -146,6 +148,9 @@ func ObtainLogLatestTimestamp(pod *corev1.Pod) (*time.Time, error) {
 	line, err := readerToString(lineReader)
 	if err != nil {
 		return nil, fmt.Errorf("Cannot read string from the reader log from pod %v, error: %v", pod.Name, err)
+	}
+	if line == "" { // log line is empty, no log data shown - taking a timestamp from time long time ago
+		return &startOfTheTimeTimestamp, nil
 	}
 	parsedTimestamp := timestampFromLogLine.FindString(line)
 	if parsedTimestamp == "" {

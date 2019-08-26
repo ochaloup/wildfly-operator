@@ -2,6 +2,7 @@ package framework
 
 import (
 	"bytes"
+	"context"
 	goctx "context"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	framework "github.com/operator-framework/operator-sdk/pkg/test"
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -102,6 +104,20 @@ func WaitUntilReady(f *framework.Framework, t *testing.T, server *wildflyv1alpha
 		return err
 	}
 	t.Logf("statefulset available (%d/%d)\n", size, size)
+
+	t.Logf("Waiting until WildflyServer %s is ready with all pods", name)
+	err = wait.Poll(retryInterval, timeout, func() (done bool, err error) {
+
+		if int32(len(server.Status.Pods)) != size {
+			t.Logf("Waiting for full availability of WildflyServer %s status data\n", name)
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -179,4 +195,17 @@ func GetLogs(f *framework.Framework, server *wildflyv1alpha1.WildFlyServer, podN
 	}
 	logs := buf.String()
 	return logs, nil
+}
+
+// GetWildflyServer returns the WildflyServer took from Kubernetes API
+func GetWildflyServer(f *framework.Framework) *wildflyv1alpha1.WildFlyServer {
+	// Fetch the WildFlyServer instance
+	wildflyServer := &wildflyv1alpha1.WildFlyServer{}
+	err := f.KubeClient.Get(context.TODO(), f.Namespace, wildflyServer)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return wildflyServer
+	}
 }
