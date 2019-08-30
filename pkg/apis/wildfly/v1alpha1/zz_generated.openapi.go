@@ -219,6 +219,13 @@ func schema_pkg_apis_wildfly_v1alpha1_WildFlyServerSpec(ref common.ReferenceCall
 							},
 						},
 					},
+					"jbossHome": {
+						SchemaProps: spec.SchemaProps{
+							Description: "JBossHome defines place where jboss distribution is located at the docker image defined by ApplicationImage",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"applicationImage", "size"},
 			},

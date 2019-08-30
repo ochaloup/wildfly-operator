@@ -11,11 +11,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+	reloadRetryCount = 10 // number of retries when waiting for container reload is done
+)
+
 var (
 	// MgmtOpServerStateRead is a JBoss CLI command for reading WFLY server
 	MgmtOpServerStateRead = ":read-attribute(name=server-state)"
 	// MgmtOpReload is a JBoss CLI command for reloading WFLY server
 	MgmtOpReload = ":reload()"
+	// MgmtOpRestart is a JBoss CLI command for restarting WFLY server
+	MgmtOpRestart = ":shutdown(restart=true)"
 	// MgmtOpTxnEnableRecoveryListener is a JBoss CLI command for enabling txn recovery listener
 	MgmtOpTxnEnableRecoveryListener = "/subsystem=transactions:write-attribute(name=recovery-listener, value=true)"
 	// MgmtOpTxnProbe is a JBoss CLI command for probing transaction log store
@@ -142,4 +148,28 @@ func GetTransactionRecoveryPort(pod *corev1.Pod, jbossHome string) (int32, error
 			portAsFloat64, mgmtOpRecoveryPortRead, jsonResult)
 	}
 	return int32(portAsFloat64), nil
+}
+
+// ExecuteOpAndWaitForServerBeingReady executes WildFly management operation on the pod
+//  this operation is checked to succeed and then waits for the container is ready
+//  this is expected to be used for reload/restart operations
+func ExecuteOpAndWaitForServerBeingReady(mgmtOp string, pod *corev1.Pod, jbossHome string) (bool, error) {
+	podName := pod.ObjectMeta.Name
+
+	jsonResult, err := ExecuteMgmtOp(pod, jbossHome, mgmtOp)
+	if err != nil {
+		return false, fmt.Errorf("Cannot run operation '%v' at application container for down pod %s, error: %v", mgmtOp, podName, err)
+	}
+	if !IsMgmtOutcomeSuccesful(jsonResult) {
+		return false, fmt.Errorf("Not succefully runnin management operation '%v' for pod %s. JSON output: %v",
+			mgmtOp, podName, jsonResult)
+	}
+	for serverStateCheckCounter := 0; err != nil && serverStateCheckCounter < reloadRetryCount; serverStateCheckCounter++ {
+		jsonResult, err = ExecuteMgmtOp(pod, jbossHome, MgmtOpServerStateRead)
+	}
+	if err != nil { // restart operation has not finished yet and server is not properly running
+		return false, fmt.Errorf("Failed waiting for server to be ready to running after operation '%s' "+
+			"on pod %v, JSON management operation result: %v, error: %v", mgmtOp, podName, jsonResult, err)
+	}
+	return true, nil
 }

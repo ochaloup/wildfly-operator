@@ -34,6 +34,7 @@ spec:
                 be deployed
               type: string
             disableHTTPRoute:
+              description: 'TODO: how to use this?'
               type: boolean
             env:
               description: Env contains environment variables for the containers running
@@ -45,6 +46,10 @@ spec:
               items:
                 type: object
               type: array
+            jbossHome:
+              description: JBossHome defines place where jboss distribution is located
+                at the docker image defined by ApplicationImage
+              type: string
             serviceAccountName:
               type: string
             sessionAffinity:

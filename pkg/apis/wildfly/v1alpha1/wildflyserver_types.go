@@ -15,7 +15,7 @@ type WildFlyServerSpec struct {
 	ApplicationImage string `json:"applicationImage"`
 	Size             int32  `json:"size"`
 	//SessionAffinity defines if connections from the same client ip are passed to the same WildFlyServer instance/pod each time
-	SessionAffinity     bool                     `json:"sessionAffinity,omitempty"`
+	SessionAffinity     bool                     `json:"sessionAffinity,omitempty"` // TODO: how to use this?
 	DisableHTTPRoute    bool                     `json:"disableHTTPRoute,omitempty"`
 	StandaloneConfigMap *StandaloneConfigMapSpec `json:"standaloneConfigMap,omitempty"`
 	Storage             *StorageSpec             `json:"storage,omitempty"`
@@ -23,6 +23,8 @@ type WildFlyServerSpec struct {
 	EnvFrom             []corev1.EnvFromSource   `json:"envFrom,omitempty"`
 	// Env contains environment variables for the containers running the WildFlyServer application
 	Env []corev1.EnvVar `json:"env,omitempty"`
+	// JBossHome defines place where jboss distribution is located at the docker image defined by ApplicationImage
+	JbossHome string `json:"jbossHome,omitempty"`
 }
 
 // StandaloneConfigMapSpec defines the desired configMap configuration to obtain the standalone configuration for WildFlyServer
