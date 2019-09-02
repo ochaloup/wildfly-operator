@@ -9,12 +9,14 @@ import (
 	framework "github.com/operator-framework/operator-sdk/pkg/test"
 	"github.com/operator-framework/operator-sdk/pkg/test/e2eutil"
 	rbac "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
+)
+
+const (
+	name = "example-wildfly"
 )
 
 // WildFlyBasicTest runs basic operator tests
@@ -202,25 +204,7 @@ func WildFlySmokeRecoveryScaledownTest(t *testing.T, applicationTag string) {
 		t.Fatalf("Failed during waiting till %s CRD resource is updated and ready: %v", name, err)
 	}
 
-	err = f.Client.Delete(context, wildflyServer)
-	if err != nil {
-		t.Fatalf("Failed to delete of WildflyServer resource: %v", err)
-	}
-	t.Logf("WildflyServer resource of application %s was deleted\n", name)
-	err = wait.Poll(retryInterval, timeout, func() (bool, error) {
-		_, err := f.KubeClient.AppsV1().StatefulSets(wildflyServer.ObjectMeta.Namespace).Get(name, metav1.GetOptions{IncludeUninitialized: true})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				t.Logf("Statefulset %s not found", name)
-				return true, nil
-			}
-			t.Logf("Got error when getting statefulset %s: %s", name, err)
-			return false, err
-		}
-		t.Logf("Waiting for statefulset being deleted...")
-		return false, nil
-	})
-	if err != nil {
+	if DeleteWildflyServer(context, wildflyServer, f, t); err != nil {
 		t.Fatalf("Failed to wait until the WildflyServer resource is deleted: %v", err)
 	}
 }

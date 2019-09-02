@@ -24,8 +24,8 @@ func TestWildFly17Server(t *testing.T) {
 		t.Fatalf("failed to add custom resource scheme to framework: %v", err)
 	}
 	// run subtests
-	// t.Run("BasicTest", wildFlyBasicTest)
-	// t.Run("ClusterTest", wildFlyClusterTest)
+	t.Run("BasicTest", wildFlyBasicTest)
+	t.Run("ClusterTest", wildFlyClusterTest)
 	t.Run("SmokeRecoveryScaledownTest", wildFlySmokeRecoveryScaledownTest)
 }
 
