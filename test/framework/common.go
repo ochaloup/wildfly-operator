@@ -15,10 +15,6 @@ import (
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
 )
 
-const (
-	name = "example-wildfly"
-)
-
 // WildFlyBasicTest runs basic operator tests
 func WildFlyBasicTest(t *testing.T, applicationTag string) {
 	ctx, f := wildflyTestSetup(t)
@@ -155,7 +151,14 @@ func wildflyClusterViewTest(t *testing.T, f *framework.Framework, ctx *framework
 		return err
 	}
 
-	return WaitUntilClusterIsFormed(f, t, wildflyServer, "clusterbench-0", "clusterbench-1")
+	if err = WaitUntilClusterIsFormed(f, t, wildflyServer, "clusterbench-0", "clusterbench-1"); err != nil {
+		return err
+	}
+
+	if DeleteWildflyServer(goctx.TODO(), wildflyServer, f, t); err != nil {
+		t.Fatalf("Failed to wait until the WildflyServer resource is deleted: %v", err)
+	}
+	return nil
 }
 
 // WildFlySmokeRecoveryScaledownTest runs recovery scale down operation

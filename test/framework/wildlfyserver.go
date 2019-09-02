@@ -73,20 +73,24 @@ func CreateAndWaitUntilReady(f *framework.Framework, ctx *framework.TestCtx, t *
 	// removing finalizers explicitly, issue https://github.com/kubernetes/kubernetes/issues/60807#issuecomment-524789119
 	ctx.AddCleanupFn(
 		func() error {
-			deployment, err := f.KubeClient.AppsV1().Deployments(server.ObjectMeta.Namespace).Get(name, metav1.GetOptions{IncludeUninitialized: true})
+			name := server.ObjectMeta.Name
+			namespace := server.ObjectMeta.Namespace
+			deployment, err := f.KubeClient.AppsV1().Deployments(namespace).Get(name, metav1.GetOptions{IncludeUninitialized: true})
+			t.Logf("Cleaning deployment '%v'\n", deployment.Name)
 			if err == nil {
 				f.Client.Delete(goctx.TODO(), deployment)
 			}
 			// cleaning finalizers
 			return wait.Poll(retryInterval, timeout, func() (done bool, err error) {
 				foundWildflyServer := &wildflyv1alpha1.WildFlyServer{}
-				namespacedName := types.NamespacedName{Name: name, Namespace: server.ObjectMeta.Namespace}
+				namespacedName := types.NamespacedName{Name: name, Namespace: namespace}
 				if errPoll := f.Client.Get(context.TODO(), namespacedName, foundWildflyServer); errPoll != nil {
 					t.Logf("Cannot obtain object of the WildflyServer '%v', cause: %v\n", name, errPoll)
 					return false, nil
 				}
 				foundWildflyServer.SetFinalizers([]string{})
 				if errPoll := f.Client.Update(context.TODO(), foundWildflyServer); errPoll != nil {
+					fmt.Println("cannot clean finalizers delete", "eRRR", errPoll)
 					t.Logf("Waiting for WildflyServer '%v' could be updated with empty finalizers array, cause: %v\n", name, errPoll)
 					return false, nil
 				}
@@ -247,9 +251,11 @@ func DeleteWildflyServer(context goctx.Context, wildflyServer *wildflyv1alpha1.W
 	if err != nil {
 		t.Fatalf("Failed to delete of WildflyServer resource: %v", err)
 	}
+	name := wildflyServer.ObjectMeta.Name
+	namespace := wildflyServer.ObjectMeta.Namespace
 	t.Logf("WildflyServer resource of application %s was deleted\n", name)
 	err = wait.Poll(retryInterval, timeout, func() (bool, error) {
-		_, err := f.KubeClient.AppsV1().StatefulSets(wildflyServer.ObjectMeta.Namespace).Get(name, metav1.GetOptions{IncludeUninitialized: true})
+		_, err := f.KubeClient.AppsV1().StatefulSets(namespace).Get(name, metav1.GetOptions{IncludeUninitialized: true})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				t.Logf("Statefulset %s not found", name)

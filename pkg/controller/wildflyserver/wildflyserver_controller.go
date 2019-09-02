@@ -744,21 +744,22 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 		}
 
 		// Marking the pod as being searched for the recovery port already
-		scaleDownPod.Annotations[markerRecoveryPort] = string(scaleDownPodRecoveryPort)
+		scaleDownPod.Annotations[markerRecoveryPort] = strconv.FormatInt(int64(scaleDownPodRecoveryPort), 10)
 		if err := r.client.Update(context.TODO(), scaleDownPod); err != nil {
 			return false, "", fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
 				scaleDownPodName, scaleDownPod.Annotations, err)
 		}
 	} else {
 		// pod annotation already contains information on recovery port thus we just use it
-		queriedScaleDownPodRecoveryPort, err := strconv.Atoi(scaleDownPod.Annotations[markerRecoveryPort])
+		queriedScaleDownPodRecoveryPortString := scaleDownPod.Annotations[markerRecoveryPort]
+		queriedScaleDownPodRecoveryPort, err := strconv.Atoi(queriedScaleDownPodRecoveryPortString)
 		if err != nil {
 			delete(scaleDownPod.Annotations, markerRecoveryPort)
 			if err := r.client.Update(context.TODO(), scaleDownPod); err != nil {
 				reqLogger.Info("Cannot update scaledown pod %v while resetting the annotation map to %v", scaleDownPodName, scaleDownPod.Annotations)
 			}
 			return false, "", fmt.Errorf("Cannot convert recovery port value '%s' to integer for the scaling down pod %v, error: %v",
-				scaleDownPod.Annotations[markerRecoveryPort], scaleDownPodName, err)
+				queriedScaleDownPodRecoveryPortString, scaleDownPodName, err)
 		}
 		scaleDownPodRecoveryPort = int32(queriedScaleDownPodRecoveryPort)
 	}
