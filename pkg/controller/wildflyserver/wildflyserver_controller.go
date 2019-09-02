@@ -150,6 +150,8 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	// indicated by the deletion timestamp being set.
 	isWildflyServerMarkedToBeDeleted := wildflyServer.GetDeletionTimestamp() != nil
 	if isWildflyServerMarkedToBeDeleted {
+		reqLogger.Info("WildflyServer is marked for deletion. Waiting for finalizers to clean the workspace.",
+			"WildflyServer name", wildflyServer.ObjectMeta.Name)
 		if wildflyutil.ContainsInList(wildflyServer.GetFinalizers(), wildflyServerFinalizer) {
 			// Run finalization logic for WildflyServer. If fails do not remove.
 			//   this will be retried at next reconciliation.
@@ -290,8 +292,17 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		update = true
 		wildflyServer.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
 	}
+	// Resetting pod state for active when scale down is not in progress
+	if wildflyServer.Status.ScalingdownPods == 0 {
+		for k, v := range wildflyServer.Status.Pods {
+			if v.State != wildflyv1alpha1.PodStateActive {
+				wildflyServer.Status.Pods[k].State = wildflyv1alpha1.PodStateActive
+				update = true
+			}
+		}
+	}
 
-	// Update WildFly Server pod status
+	// Update WildFly Server pod status based on the number of StatefulSet pods
 	requeue, podsStatus := getPodStatus(podList.Items, wildflyServer.Status.Pods)
 	if !reflect.DeepEqual(podsStatus, wildflyServer.Status.Pods) {
 		update = true
@@ -650,24 +661,14 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 	}
 	wg.Wait()
 
-	// Updating the pod state based on the statuses from recovery processing
-	isUpdateWildflyServerSpec := false
-	for wildflyServerPodStatusIndex, v := range w.Status.Pods {
-		if podStateValue, exist := scaleDownPodsState.Load(v.Name); exist {
-			w.Status.Pods[wildflyServerPodStatusIndex].State = podStateValue.(string)
-			isUpdateWildflyServerSpec = true
-		} else {
-			if w.Status.Pods[wildflyServerPodStatusIndex].State != wildflyv1alpha1.PodStateActive {
-				w.Status.Pods[wildflyServerPodStatusIndex].State = wildflyv1alpha1.PodStateActive
-				isUpdateWildflyServerSpec = true
+	// Updating the pod state based on the recovery processing when a scale down is in progress
+	if numberOfPodsToScaleDown > 0 {
+		for wildflyServerPodStatusIndex, v := range w.Status.Pods {
+			if podStateValue, exist := scaleDownPodsState.Load(v.Name); exist {
+				w.Status.Pods[wildflyServerPodStatusIndex].State = podStateValue.(string)
 			}
 		}
-	}
-	if numberOfPodsToScaleDown > 0 {
 		w.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
-		isUpdateWildflyServerSpec = true
-	}
-	if isUpdateWildflyServerSpec {
 		if err := r.client.Status().Update(context.Background(), w); err != nil && !strings.Contains(err.Error(), "object has been modified") {
 			reqLogger.Error(err, "Failed to update status of pods in WildFlyServer during transaction recovery scale down processing",
 				"WildflyServer name", w.ObjectMeta.Name)
