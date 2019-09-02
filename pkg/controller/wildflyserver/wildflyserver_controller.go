@@ -146,7 +146,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	// Check if the WildFly server instance is marked to be deleted, which is
+	// Check if the WildFlyServer instance is marked to be deleted, which is
 	// indicated by the deletion timestamp being set.
 	isWildflyServerMarkedToBeDeleted := wildflyServer.GetDeletionTimestamp() != nil
 	if isWildflyServerMarkedToBeDeleted {
@@ -180,20 +180,20 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 	wildflyServerSpecSize := wildflyServer.Spec.Size
-	wildflyServerNumberOfPods := len(wildflyServer.Status.Pods)
+	// wildflyServerNumberOfPods := len(wildflyServer.Status.Pods) TODO: required to count with this?
 	statefulsetSpecSize := *foundStatefulSet.Spec.Replicas
 	numberOfDeployedPods := int32(len(podList.Items))
 
 	if statefulsetSpecSize == wildflyServerSpecSize && numberOfDeployedPods != wildflyServerSpecSize {
-		reqLogger.Info("Number of pods does not match the WildFly server specification. Waiting to get numbers in sync.",
+		reqLogger.Info("Number of pods does not match the WildFlyServer specification. Waiting to get numbers in sync.",
 			"WildflyServer specification", wildflyServer.Name, "Expected number of pods", wildflyServerSpecSize, "Number of deployed pods", numberOfDeployedPods,
 			"StatefulSet spec size", statefulsetSpecSize)
 		return reconcile.Result{}, nil
 	}
 
-	// Checking if  WildFlyServerSpec is about to be scaled down
-	numberOfPodsToScaleDown := wildflyServerNumberOfPods - int(wildflyServerSpecSize) // difference between desired pod count and the current number of pods
-	wasRecoverySuccesful, err := r.processTransactionRecoveryScaleDown(reqLogger, wildflyServer, numberOfPodsToScaleDown, podList)
+	// Checking if WildFlyServerSpec is about to be scaled down
+	numberOfPodsToScaleDown := statefulsetSpecSize - wildflyServerSpecSize // difference between desired pod count and the current number of pods
+	wasRecoverySuccesful, err := r.processTransactionRecoveryScaleDown(reqLogger, wildflyServer, int(numberOfPodsToScaleDown), podList)
 	if err != nil {
 		// error during processing transaction recovery, requeue
 		return reconcile.Result{}, err
@@ -570,13 +570,13 @@ func (r *ReconcileWildFlyServer) finalizeWildflyServer(reqLogger logr.Logger, w 
 }
 
 func (r *ReconcileWildFlyServer) addWildflyServerFinalizer(reqLogger logr.Logger, w *wildflyv1alpha1.WildFlyServer) error {
-	reqLogger.Info("Adding Finalizer for the WildflyServer")
+	reqLogger.Info("Adding Finalizer for the WildFlyServer", "WildFly Server name", w.ObjectMeta.Name)
 	w.SetFinalizers(append(w.GetFinalizers(), wildflyServerFinalizer))
 
 	// Update CR WildflyServer
 	err := r.client.Update(context.TODO(), w)
 	if err != nil {
-		reqLogger.Error(err, "Failed to update WildflyServer with finalizer")
+		reqLogger.Error(err, "Failed to update WildFlyServer with finalizer", "WildFly Server name", w.ObjectMeta.Name)
 		return err
 	}
 	return nil
@@ -587,11 +587,12 @@ func (r *ReconcileWildFlyServer) addWildflyServerFinalizer(reqLogger logr.Logger
 //   it retunrs false if there is some unfinished transactions in pod or an error occured
 func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger logr.Logger, w *wildflyv1alpha1.WildFlyServer, numberOfPodsToScaleDown int, podList *corev1.PodList) (bool, error) {
 	wildflyServerNumberOfPods := len(podList.Items)
-	scaleDownPodsState := sync.Map{}    // map referring to: pod name - pod state
-	scaleDownErrors := make(chan error) // errors occured during processing the scaledown for the pods
+	scaleDownPodsState := sync.Map{} // map referring to: pod name - pod state
+	scaleDownErrors := sync.Map{}    // errors occured during processing the scaledown for the pods
 
 	var wg sync.WaitGroup
 	for scaleDownIndex := 1; scaleDownIndex <= numberOfPodsToScaleDown; scaleDownIndex++ {
+		wg.Add(1)
 		scaleDownPod := podList.Items[wildflyServerNumberOfPods-scaleDownIndex]
 		go func() {
 			defer wg.Done()
@@ -602,13 +603,11 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 				scaleDownPodIP = "[" + scaleDownPodIP + "]" // for IPv6
 			}
 
-			reqLogger.Info("Going for scaledown with pod. Processing transaction recovery consistency checks",
-				"Pod Name", scaleDownPodName, "IP Address", scaleDownPodIP)
-
 			// Setting-up the pod status - status is used to decide if the pod could be scaled (aka. removed from the statefulset)
 			wildflyServerSpecPodStatus := getWildflyServerPodStatusByName(w, scaleDownPodName)
 			if wildflyServerSpecPodStatus == nil {
-				scaleDownErrors <- fmt.Errorf("Cannot find pod name '%v' in the list of the active pods for the WildflyServer operator: %v", scaleDownPodName, w)
+				scaleDownErrors.Store(scaleDownPodName,
+					fmt.Errorf("Cannot find pod name '%v' in the list of the active pods for the WildflyServer operator: %v", scaleDownPodName, w))
 				return
 			}
 			scaleDownPodsState.Store(scaleDownPodName, wildflyServerSpecPodStatus.State)
@@ -618,11 +617,14 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 			}
 
 			if wildflyServerSpecPodStatus.State != wildflyv1alpha1.PodStateScalingDownClean {
+				reqLogger.Info("Transaction recovery scaledown processing", "Pod Name", scaleDownPodName, "IP Address", scaleDownPodIP)
+
 				// Removing the pod from the Service handling
 				if scaleDownPod.ObjectMeta.Labels[markerOperatedByService] != markerScaleDownProcessing {
 					scaleDownPod.ObjectMeta.Labels[markerOperatedByService] = markerScaleDownProcessing
 					if err := r.client.Update(context.TODO(), &scaleDownPod); err != nil {
-						scaleDownErrors <- fmt.Errorf("Failed to update pod labels, pod name %v, labels %v, error: %v", scaleDownPodName, scaleDownPod.ObjectMeta.Labels, err)
+						scaleDownErrors.Store(scaleDownPodName,
+							fmt.Errorf("Failed to update pod labels, pod name %v, labels %v, error: %v", scaleDownPodName, scaleDownPod.ObjectMeta.Labels, err))
 						return
 					}
 				}
@@ -630,7 +632,7 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 				success, message, err := r.checkRecovery(reqLogger, &scaleDownPod, w)
 				if err != nil {
 					// An error happened during recovery
-					scaleDownErrors <- err
+					scaleDownErrors.Store(scaleDownPodName, err)
 					return
 				}
 				if success {
@@ -647,27 +649,40 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 		}() // execution of the go routine for one pod
 	}
 	wg.Wait()
-	close(scaleDownErrors)
 
-	// Updating the pod state based on the recovery processing when a scale down is in progress
-	if numberOfPodsToScaleDown > 0 {
-		for podsIndex, v := range w.Status.Pods {
-			if podStateValue, exist := scaleDownPodsState.Load(v.Name); exist {
-				w.Status.Pods[podsIndex].State = fmt.Sprintf("%v", podStateValue)
+	// Updating the pod state based on the statuses from recovery processing
+	isUpdateWildflyServerSpec := false
+	for wildflyServerPodStatusIndex, v := range w.Status.Pods {
+		if podStateValue, exist := scaleDownPodsState.Load(v.Name); exist {
+			w.Status.Pods[wildflyServerPodStatusIndex].State = podStateValue.(string)
+			isUpdateWildflyServerSpec = true
+		} else {
+			if w.Status.Pods[wildflyServerPodStatusIndex].State != wildflyv1alpha1.PodStateActive {
+				w.Status.Pods[wildflyServerPodStatusIndex].State = wildflyv1alpha1.PodStateActive
+				isUpdateWildflyServerSpec = true
 			}
 		}
+	}
+	if numberOfPodsToScaleDown > 0 {
 		w.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
+		isUpdateWildflyServerSpec = true
+	}
+	if isUpdateWildflyServerSpec {
 		if err := r.client.Status().Update(context.Background(), w); err != nil && !strings.Contains(err.Error(), "object has been modified") {
-			reqLogger.Error(err, "Failed to update pods in WildFlyServer status during transaction recovery scale down processing")
+			reqLogger.Error(err, "Failed to update status of pods in WildFlyServer during transaction recovery scale down processing",
+				"WildflyServer name", w.ObjectMeta.Name)
 		}
 	}
-	// Error happened during recovery processing, report and requeue
-	if len(scaleDownErrors) > 0 {
-		var errStrings = ""
-		for v := range scaleDownErrors {
-			errStrings += " [[" + v.Error() + "]],"
-		}
-		return false, fmt.Errorf("Found %v errors:\n%s", len(scaleDownErrors), errStrings)
+	// Verification if an error happened during the recovery processing, report and requeue
+	var errStrings string
+	numberOfScaleDownErrors := 0
+	scaleDownErrors.Range(func(k, v interface{}) bool {
+		numberOfScaleDownErrors++
+		errStrings += " [[" + v.(error).Error() + "]],"
+		return true
+	})
+	if numberOfScaleDownErrors > 0 {
+		return false, fmt.Errorf("Found %v errors:\n%s", numberOfScaleDownErrors, errStrings)
 	}
 	// Verification if some pod is marked as recovery needed
 	isForRecovery := false
@@ -724,7 +739,7 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 			scaleDownPodRecoveryPort = queriedScaleDownPodRecoveryPort
 		}
 		if err != nil {
-			reqLogger.Error(err, "Error on reading transaction recovery port with management command")
+			reqLogger.Error(err, "Error on reading transaction recovery port with management command", "Pod name", scaleDownPodName)
 		}
 
 		// Marking the pod as being searched for the recovery port already
