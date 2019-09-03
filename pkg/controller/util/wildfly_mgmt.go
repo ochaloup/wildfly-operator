@@ -34,6 +34,8 @@ var (
 	MgmtOpSocketBindingRecoveryPortAddress = "/socket-binding-group=standard-sockets/socket-binding="
 	// MgmtOpSocketBindingRecoveryPortRead is a JBoss CLI command for reading recovery port
 	MgmtOpSocketBindingRecoveryPortRead = ":read-attribute(name=port)"
+	// MgmtOpPortOffsetRead reads port of set defined for the standard-sockets binding group
+	MgmtOpPortOffsetRead = "/socket-binding-group=standard-sockets:read-attribute(name=port-offset,resolve-expressions=true)"
 	// MgmtOpSystemPropertyRecoveryBackoffPeriod is a JBoss CLI command to set system property of recovery backoff period
 	MgmtOpSystemPropertyRecoveryBackoffPeriod = "/system-property=com.arjuna.ats.arjuna.common.RecoveryEnvironmentBean.recoveryBackoffPeriod:add(value=%s)"
 	// MgmtOpSystemPropertyPeriodicRecoveryPeriod is a JBoss CLI command to set system property of periodic recovery period
@@ -142,12 +144,30 @@ func GetTransactionRecoveryPort(pod *corev1.Pod, jbossHome string) (int32, error
 		return 0, fmt.Errorf("Cannot read recovery port. The response on command '%v' was %v",
 			mgmtOpRecoveryPortRead, jsonResult)
 	}
-	portAsFloat64, isFloat64 := jsonResult["result"].(float64)
+	recoveryPortAsFloat64, isFloat64 := jsonResult["result"].(float64)
 	if !isFloat64 {
 		return 0, fmt.Errorf("Cannot parse result for reading recovery port. The typed result is '%v', from command '%v' of whole JSON result: %v",
-			portAsFloat64, mgmtOpRecoveryPortRead, jsonResult)
+			recoveryPortAsFloat64, mgmtOpRecoveryPortRead, jsonResult)
 	}
-	return int32(portAsFloat64), nil
+	recoveryPort := int32(recoveryPortAsFloat64)
+
+	jsonResult, err = ExecuteMgmtOp(pod, jbossHome, MgmtOpPortOffsetRead)
+	if err != nil {
+		return 0, fmt.Errorf("Error on management operation to read port offset for socket binding with command %v, error: %v",
+			MgmtOpPortOffsetRead, err)
+	}
+	if !IsMgmtOutcomeSuccesful(jsonResult) {
+		return 0, fmt.Errorf("Cannot read port offset for socket binding. The response on command '%v' was %v",
+			MgmtOpPortOffsetRead, jsonResult)
+	}
+	portOffsetAsFloat64, isFloat64 := jsonResult["result"].(float64)
+	if !isFloat64 {
+		return 0, fmt.Errorf("Cannot parse result for reading port offset. The typed result is '%v', from command '%v' of whole JSON result: %v",
+			portOffsetAsFloat64, MgmtOpPortOffsetRead, jsonResult)
+	}
+	portOffset := int32(portOffsetAsFloat64)
+
+	return recoveryPort + portOffset, nil
 }
 
 // ExecuteOpAndWaitForServerBeingReady executes WildFly management operation on the pod

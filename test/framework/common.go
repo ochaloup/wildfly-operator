@@ -151,14 +151,7 @@ func wildflyClusterViewTest(t *testing.T, f *framework.Framework, ctx *framework
 		return err
 	}
 
-	if err = WaitUntilClusterIsFormed(f, t, wildflyServer, "clusterbench-0", "clusterbench-1"); err != nil {
-		return err
-	}
-
-	if DeleteWildflyServer(goctx.TODO(), wildflyServer, f, t); err != nil {
-		t.Fatalf("Failed to wait until the WildflyServer resource is deleted: %v", err)
-	}
-	return nil
+	return WaitUntilClusterIsFormed(f, t, wildflyServer, "clusterbench-0", "clusterbench-1")
 }
 
 // WildFlySmokeRecoveryScaledownTest runs recovery scale down operation

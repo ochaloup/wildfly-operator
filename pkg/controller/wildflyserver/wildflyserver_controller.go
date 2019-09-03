@@ -768,7 +768,8 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 	reqLogger.Info("Executing recovery scan", "Pod name", scaleDownPodName, "Pod IP", scaleDownPodIP, "Recovery port", scaleDownPodRecoveryPort)
 	_, err = wildflyutil.SocketConnect(scaleDownPodIP, scaleDownPodRecoveryPort, txnRecoveryScanCommand)
 	if err != nil {
-		return false, "", fmt.Errorf("Failed to run transaction recovery scan for scaling down pod %v, error: %v", scaleDownPodName, err)
+		return false, "", fmt.Errorf("Failed to run transaction recovery scan for scaling down pod %v. "+
+			"Please, verify the pod log file. Error: %v", scaleDownPodName, err)
 	}
 	// No error on recovery scan => all the registered resources were available during the recovery processing
 	foundLogLine, err := wildflyutil.VerifyLogContainsRegexp(scaleDownPod, scaleDownPodLogTimestampAtStart, recoveryErrorRegExp)
