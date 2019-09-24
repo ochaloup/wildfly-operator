@@ -241,7 +241,7 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 	// Processing recovery on pods which are planned to be removed because of scale down is in progress now
 	mustReconcile, err := r.processTransactionRecoveryScaleDown(reqLogger, wildflyServer, int(numberOfPodsToScaleDown), podList)
-	if mustReconcile { // server state was updated (or/and some erro could happen), we need to reconcile
+	if mustReconcile { // server state was updated (or/and some error could happen), we need to reconcile
 		return reconcile.Result{Requeue: true}, err
 	}
 	if err != nil {
@@ -756,12 +756,12 @@ func (r *ReconcileWildFlyServer) routeForWildFly(w *wildflyv1alpha1.WildFlyServe
 	return route
 }
 
-func (r *ReconcileWildFlyServer) finalizeWildflyServer(reqLogger logr.Logger, w *wildflyv1alpha1.WildFlyServer) (bool, error) {
+func (r *ReconcileWildFlyServer) finalizeWildflyServer(reqLogger logr.Logger, w *wildflyv1alpha1.WildFlyServer) (requeue bool, err error) {
 	podList, err := GetPodsForWildFly(r, w)
 	if err != nil {
 		return false, fmt.Errorf("Finalizer processing: failed to list pods for WildflyServer %v:%v name Error: %v", w.Namespace, w.Name, err)
 	}
-	requeue, err := r.processTransactionRecoveryScaleDown(reqLogger, w, len(podList.Items), podList)
+	requeue, err = r.processTransactionRecoveryScaleDown(reqLogger, w, len(podList.Items), podList)
 	if err != nil {
 		// error during processing transaction recovery, error from finalizer
 		return false, fmt.Errorf("Finalizer processing: failed transaction recovery for WildflyServer %v:%v name Error: %v", w.Namespace, w.Name, err)
@@ -769,14 +769,18 @@ func (r *ReconcileWildFlyServer) finalizeWildflyServer(reqLogger logr.Logger, w 
 	if requeue {
 		return true, nil
 	}
+	podsErrors := ""
 	for _, v := range w.Status.Pods {
 		if v.State == wildflyv1alpha1.PodStateScalingDownRecoveryInvestigation {
-			return false, fmt.Errorf("Finalizer processing: recovery in progress at %v/%v at pod %v", w.Namespace, w.Name, v.Name)
-		}
-		if v.State != wildflyv1alpha1.PodStateScalingDownClean {
-			return false, fmt.Errorf("Finalizer processing: transaction recovery processed with unfinished transactions at %v/%v at pod %v with state %v",
+			podsErrors += fmt.Sprintf("[Finalizer processing: recovery in progress at %v/%v at pod %v] ", w.Namespace, w.Name, v.Name)
+		} else if v.State != wildflyv1alpha1.PodStateScalingDownClean {
+			podsErrors += fmt.Sprintf("[Finalizer processing: transaction recovery processed with unfinished transactions at %v/%v at pod %v with state %v] ",
 				w.Namespace, w.Name, v.Name, v.State)
 		}
+	}
+	// if there is errors we will requeue
+	if podsErrors != "" {
+		return true, fmt.Errorf(podsErrors)
 	}
 	reqLogger.Info("Finalizer finished succesfully", "WildflyServer Namespace", w.Namespace, "WildflyServer Name", w.Name)
 	return false, nil
@@ -989,8 +993,10 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 				"Management command: %v, JSON response: %v", scaleDownPodName, wildflyutil.MgmtOpTxnCheckRecoveryListener, jsonResult)
 		}
 		// When listener is not enabled then the pod will be terminated
-		if jsonResult["result"] != "true" {
-			reqLogger.Info("Transaction recovery listener is not enabled. Recovery pocess can't proceed at pod " + scaleDownPodName)
+		isTxRecoveryListenerEnabledAsInterface := wildflyutil.ReadJSONDataByIndex(jsonResult, "result")
+		isTxRecoveryListenerEnabledAsString, _ := wildflyutil.ConvertToString(isTxRecoveryListenerEnabledAsInterface)
+		if txrecoverydefined, err := strconv.ParseBool(isTxRecoveryListenerEnabledAsString); err == nil && !txrecoverydefined {
+			reqLogger.Info("Transaction recovery listener is not enabled. Transaction recovery cannot proceed at pod " + scaleDownPodName)
 			r.recorder.Event(w, corev1.EventTypeWarning, "WildFlyServerTransactionRecovery",
 				"Application server at pod "+scaleDownPodName+" does not define transaction recovery listener and recovery processing can't go forward."+
 					" Please consider fixing server configuration. The pod is now going to be terminated.")
