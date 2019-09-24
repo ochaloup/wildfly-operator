@@ -1,9 +1,11 @@
 package util
 
 import (
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -86,4 +88,26 @@ func MapMerge(firstMap map[string]string, secondOverwritingMap map[string]string
 		returnedMap[v] = k
 	}
 	return returnedMap
+}
+
+// GetEnvAsInt returns defined environment variable as an integer
+//  or default value is returned if the env var is not configured
+func GetEnvAsInt(key string, fallbackInteger int64) int64 {
+	valueStr, ok := os.LookupEnv(key)
+	if ok {
+		valueInt, err := strconv.ParseInt(valueStr, 10, 64)
+		if err == nil {
+			return valueInt
+		}
+	}
+	return fallbackInteger
+}
+
+// GetEnvAsDurationInSeconds returns defined environment variable as duration
+//  while it expects the environment variable contains the number of seconds
+//  that will be converted to duration
+//  or default value is returned if the env var is not configured
+func GetEnvAsDurationInSeconds(key string, fallbackSeconds int64) time.Duration {
+	valueSeconds := GetEnvAsInt(key, fallbackSeconds)
+	return time.Duration(valueSeconds) * time.Second
 }
