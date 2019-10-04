@@ -185,6 +185,17 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 				setPeriodOps, scaleDownPodName, jsonResult, errExecution)
 		}
 
+		reqLogger.Info("Restarting application server to apply the env properies", "Pod Name", scaleDownPodName)
+		if _, err := wildflyutil.ExecuteOpAndWaitForServerBeingReady(reqLogger, wildflyutil.MgmtOpRestart, scaleDownPod, resources.JBossHome); err != nil {
+			return false, fmt.Errorf("Cannot restart application server after setting up the periodic recovery properties, "+
+				"pod name %v, error: %v", scaleDownPodName, err)
+		}
+		reqLogger.Info("Suspending application server to not processing new commands", "Pod Name", scaleDownPodName)
+		jsonResult, err := wildflyutil.ExecuteMgmtOp(scaleDownPod, resources.JBossHome, wildflyutil.MgmtOpSuspend)
+		if errExecution != nil || !wildflyutil.IsMgmtOutcomeSuccesful(jsonResult) {
+			return false, fmt.Errorf("Cannot suspend application server, pod name %v, error: %v", scaleDownPodName, err)
+		}
+
 		reqLogger.Info("Marking pod as being setup for transaction recovery. Adding annotation "+markerRecoveryPropertiesSetup, "Pod Name", scaleDownPodName)
 		annotations := wildflyutil.MapMerge(
 			scaleDownPod.GetAnnotations(), map[string]string{markerRecoveryPropertiesSetup: "true"})
@@ -192,11 +203,6 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
 			return false, fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
 				scaleDownPodName, scaleDownPod.Annotations, err)
-		}
-
-		reqLogger.Info("Restarting application server to apply the env properies", "Pod Name", scaleDownPodName)
-		if _, err := wildflyutil.ExecuteOpAndWaitForServerBeingReady(reqLogger, wildflyutil.MgmtOpRestart, scaleDownPod, resources.JBossHome); err != nil {
-			return false, fmt.Errorf("Cannot restart application server after setting up the periodic recovery properties, error: %v", err)
 		}
 
 		return true, nil

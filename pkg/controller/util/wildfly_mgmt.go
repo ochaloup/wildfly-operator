@@ -17,10 +17,10 @@ var (
 
 	// MgmtOpServerStateRead is a JBoss CLI command for reading WFLY server
 	MgmtOpServerStateRead = ":read-attribute(name=server-state)"
-	// MgmtOpReload is a JBoss CLI command for reloading WFLY server
-	MgmtOpReload = ":reload()"
 	// MgmtOpRestart is a JBoss CLI command for restarting WFLY server
 	MgmtOpRestart = ":shutdown(restart=true)"
+	// MgmtOpSuspend is a JBoss CLI command for suspending WFLY server
+	MgmtOpSuspend = ":suspend()"
 	// MgmtOpTxnCheckRecoveryListener is a JBoss CLI command for enabling txn recovery listener
 	MgmtOpTxnCheckRecoveryListener = "/subsystem=transactions:read-attribute(name=recovery-listener)"
 	// MgmtOpTxnProbe is a JBoss CLI command for probing transaction log store
