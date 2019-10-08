@@ -14,6 +14,8 @@ import (
 	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
 	"github.com/wildfly/wildfly-operator/pkg/resources"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 var (
@@ -26,8 +28,10 @@ const (
 	markerRecoveryPort          = "recovery-port" // annotation name to save recovery port
 	// markerRecoveryPropertiesSetup declare that recovery properties were setup for app server
 	markerRecoveryPropertiesSetup = "recovery-properties-setup"
-	txnRecoveryScanCommand        = "SCAN"            // Narayana socket command to force recovery
-	wftcDataDirName               = "ejb-xa-recovery" // data directory where WFTC stores transaction runtime data
+	// markerRecoverySuspend declare that the app server was suspended to not proceed new requests during scaledown
+	markerRecoverySuspend  = "recovery-suspend-setup"
+	txnRecoveryScanCommand = "SCAN"            // Narayana socket command to force recovery
+	wftcDataDirName        = "ejb-xa-recovery" // data directory where WFTC stores transaction runtime data
 )
 
 func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownPod *corev1.Pod, w *wildflyv1alpha1.WildFlyServer) (bool, string, error) {
@@ -169,7 +173,9 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 }
 
 func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger logr.Logger, scaleDownPod *corev1.Pod, w *wildflyv1alpha1.WildFlyServer) (needReconcile bool, err error) {
+	requeue := false
 	scaleDownPodName := scaleDownPod.ObjectMeta.Name
+
 	// Setup and restart only if it was not done in the prior reconcile cycle
 	if scaleDownPod.Annotations[markerRecoveryPropertiesSetup] == "" {
 		reqLogger.Info("Setting up back-off period and orphan detection properties for scaledown transaction reocovery", "Pod Name", scaleDownPodName)
@@ -190,25 +196,69 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 			return false, fmt.Errorf("Cannot restart application server after setting up the periodic recovery properties, "+
 				"pod name %v, error: %v", scaleDownPodName, err)
 		}
+
+		reqLogger.Info("Marking pod as restarted with transaction recovery setup. Adding annotation "+markerRecoveryPropertiesSetup, "Pod Name", scaleDownPodName)
+		_, err := r.updatePodAnnotation(w, scaleDownPod, markerRecoveryPropertiesSetup, "true")
+		if err != nil {
+			return true, err
+		}
+
+		requeue = true
+	} else {
+		reqLogger.Info("Recovery properties at pod were already defined. Skipping server restart.", "Pod Name", scaleDownPodName)
+	}
+
+	// Suspend and redefine liveness probe only if it was not done in the prior reconcile cycle
+	if scaleDownPod.Annotations[markerRecoverySuspend] == "" {
 		reqLogger.Info("Suspending application server to not processing new commands", "Pod Name", scaleDownPodName)
 		jsonResult, err := wildflyutil.ExecuteMgmtOp(scaleDownPod, resources.JBossHome, wildflyutil.MgmtOpSuspend)
-		if errExecution != nil || !wildflyutil.IsMgmtOutcomeSuccesful(jsonResult) {
-			return false, fmt.Errorf("Cannot suspend application server, pod name %v, error: %v", scaleDownPodName, err)
+		if err != nil || !wildflyutil.IsMgmtOutcomeSuccesful(jsonResult) {
+			return false, fmt.Errorf("Cannot suspend application server, pod name %v, JSON output: %v, error: %v", scaleDownPodName, jsonResult, err)
 		}
 
-		reqLogger.Info("Marking pod as being setup for transaction recovery. Adding annotation "+markerRecoveryPropertiesSetup, "Pod Name", scaleDownPodName)
+		// when the pod was updated we need to reload it from the Kubernetes API
+		if requeue {
+			podReloaded := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: scaleDownPodName, Namespace: scaleDownPod.ObjectMeta.Namespace}}
+			if err := resources.Get(w, types.NamespacedName{Name: w.Name, Namespace: w.Namespace}, r.client, podReloaded); err != nil {
+				scaleDownPod = podReloaded
+			} else {
+				return true, fmt.Errorf("Cannot re-load pod of name %v. Cannot mark it as suspended. Error: %v", scaleDownPodName, err)
+			}
+		}
+
+		reqLogger.Info("Marking pod as suspended. Adding annotation "+markerRecoverySuspend, "Pod Name", scaleDownPodName)
 		annotations := wildflyutil.MapMerge(
-			scaleDownPod.GetAnnotations(), map[string]string{markerRecoveryPropertiesSetup: "true"})
+			scaleDownPod.GetAnnotations(), map[string]string{markerRecoverySuspend: "true"})
 		scaleDownPod.SetAnnotations(annotations)
+		for id := range scaleDownPod.Spec.Containers {
+			// readiness probe to fail all the time for the pod not being part of any service
+			scaleDownPod.Spec.Containers[id].ReadinessProbe =
+				&corev1.Probe{
+					Handler: corev1.Handler{
+						Exec: &corev1.ExecAction{
+							Command: []string{"exit 1"},
+						},
+					},
+				}
+			// liveness probe needs to run just cli command as all requests are down because of suspened
+			scaleDownPod.Spec.Containers[id].LivenessProbe =
+				&corev1.Probe{
+					Handler: corev1.Handler{
+						Exec: &corev1.ExecAction{
+							Command: []string{wildflyutil.GetJBossCli(resources.JBossHome, wildflyutil.MgmtOpServerStateRead)},
+						},
+					},
+				}
+		}
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
-			return false, fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
-				scaleDownPodName, scaleDownPod.Annotations, err)
+			return false, fmt.Errorf("Failed to update pod annotations and probes, pod name %v, annotations to be set %v, error: %v",
+				scaleDownPod.Name, scaleDownPod.Annotations, err)
 		}
 
-		return true, nil
+		requeue = true
 	}
-	reqLogger.Info("Recovery properties at pod were already defined. Skipping server restart.", "Pod Name", scaleDownPodName)
-	return false, nil
+
+	return requeue, nil
 }
 
 func (r *ReconcileWildFlyServer) updatePodLabel(w *wildflyv1alpha1.WildFlyServer, scaleDownPod *corev1.Pod, labelName, labelValue string) (bool, error) {
@@ -218,6 +268,29 @@ func (r *ReconcileWildFlyServer) updatePodLabel(w *wildflyv1alpha1.WildFlyServer
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
 			return false, fmt.Errorf("Failed to update pod labels for pod %v with label [%s=%s], error: %v",
 				scaleDownPod.ObjectMeta.Name, labelName, labelValue, err)
+		}
+		updated = true
+	}
+	return updated, nil
+}
+
+func (r *ReconcileWildFlyServer) updatePodAnnotation(w *wildflyv1alpha1.WildFlyServer, scaleDownPod *corev1.Pod, annotationName, annotationValue string) (bool, error) {
+	updated := false
+
+	podReloaded := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: scaleDownPod.ObjectMeta.Name, Namespace: scaleDownPod.ObjectMeta.Namespace}}
+	if err := resources.Get(w, types.NamespacedName{Name: w.Name, Namespace: w.Namespace}, r.client, podReloaded); err != nil {
+		scaleDownPod = podReloaded
+	} else {
+		return true, fmt.Errorf("Cannot re-load pod of name %v. Cannot mark it as suspended. Error: %v", scaleDownPod.ObjectMeta.Name, err)
+	}
+
+	if scaleDownPod.GetAnnotations()[annotationName] != annotationValue {
+		annotations := wildflyutil.MapMerge(
+			scaleDownPod.GetAnnotations(), map[string]string{annotationName: annotationValue})
+		scaleDownPod.SetAnnotations(annotations)
+		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
+			return false, fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
+				scaleDownPod.Name, scaleDownPod.Annotations, err)
 		}
 		updated = true
 	}

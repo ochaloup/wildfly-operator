@@ -46,11 +46,16 @@ func IsMgmtOutcomeSuccesful(jsonBody map[string]interface{}) bool {
 	return outcomeAsString == "success"
 }
 
+// GetJBossCli returns a string as a command of jboss CLI command
+func GetJBossCli(jbossHome string, mgmtOpString string) string {
+	return fmt.Sprintf("%s/bin/jboss-cli.sh --output-json -c --commands='%s'", jbossHome, mgmtOpString)
+}
+
 // ExecuteMgmtOp executes WildFly managemnt operation represented as a string
 //  the execution runs as shh remote command with jboss-cli.sh executed on the pod
 //  returns the JSON as the return value from the operation
 func ExecuteMgmtOp(pod *corev1.Pod, jbossHome string, mgmtOpString string) (map[string]interface{}, error) {
-	jbossCliCommand := fmt.Sprintf("%s/bin/jboss-cli.sh --output-json -c --commands='%s'", jbossHome, mgmtOpString)
+	jbossCliCommand := GetJBossCli(jbossHome, mgmtOpString)
 	resString, err := ExecRemote(pod, jbossCliCommand)
 	if err != nil && resString == "" {
 		return nil, fmt.Errorf("Cannot execute JBoss CLI command %s at pod %v. Cause: %v", jbossCliCommand, pod.Name, err)
