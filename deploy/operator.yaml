@@ -15,7 +15,7 @@ spec:
       serviceAccountName: wildfly-operator
       containers:
         - name: wildfly-operator
-          image: quay.io/wildfly/wildfly-operator:latest
+          image: image-registry.openshift-image-registry.svc:5000/ochaloup-namespace/wildfly-operator:latest
           command:
           - wildfly-operator
           imagePullPolicy: Always

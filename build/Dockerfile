@@ -1,11 +1,14 @@
 FROM registry.access.redhat.com/ubi7/ubi-minimal:latest
 
 ENV OPERATOR=/usr/local/bin/wildfly-operator \
-    JBOSS_HOME=/wildfly \
+    JBOSS_HOME=/opt/eap \
     USER_UID=1001 \
     USER_NAME=wildfly-operator \
-    LABEL_APP_MANAGED_BY=wildfly-operator \
-    LABEL_APP_RUNTIME=wildfly
+    LABEL_APP_MANAGED_BY=eap-operator \
+    LABEL_APP_RUNTIME=eap \
+    OPERATOR_NAME=eap-operator \
+    SERVER_LIVENESS_SCRIPT="/opt/eap/bin/livenessProbe.sh" \
+    SERVER_READINESS_SCRIPT="/opt/eap/bin/readinessProbe.sh"
 
 # install operator binary
 COPY build/_output/bin/wildfly-operator ${OPERATOR}
