@@ -14,6 +14,7 @@ import (
 	wildflyutil "github.com/wildfly/wildfly-operator/pkg/controller/util"
 	"github.com/wildfly/wildfly-operator/pkg/resources"
 	corev1 "k8s.io/api/core/v1"
+	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 var (
@@ -77,12 +78,18 @@ func (r *ReconcileWildFlyServer) checkRecovery(reqLogger logr.Logger, scaleDownP
 		}
 
 		// The pod was already searched for the recovery port, marking that into the annotations
+		scaleDownPodRecoveryPortAsString := strconv.FormatInt(int64(scaleDownPodRecoveryPort), 10)
+		reqLogger.Info("Marking pod with annotation "+markerRecoveryPort+" of value "+scaleDownPodRecoveryPortAsString, "Pod Name", scaleDownPodName)
 		annotations := wildflyutil.MapMerge(
-			scaleDownPod.GetAnnotations(), map[string]string{markerRecoveryPort: strconv.FormatInt(int64(scaleDownPodRecoveryPort), 10)})
+			scaleDownPod.GetAnnotations(), map[string]string{markerRecoveryPort: scaleDownPodRecoveryPortAsString})
 		scaleDownPod.SetAnnotations(annotations)
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
-			return false, "", fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
-				scaleDownPodName, scaleDownPod.Annotations, err)
+			if apiErrors.IsConflict(err) {
+				return true, "", nil // conflict require reconciliation but it's not an error to be reported
+			} else {
+				return false, "", fmt.Errorf("Failed to update pod annotation %s, pod name %s, annotations %v, error: %v",
+					markerRecoveryPort, scaleDownPodName, scaleDownPod.Annotations, err)
+			}
 		}
 	} else {
 		// pod annotation already contains information on recovery port thus we just use it
@@ -171,7 +178,7 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 		return requeueLater, nil
 	}
 	if isRunning, errCli := wildflyutil.IsAppServerRunningViaJBossCli(scaleDownPod); !isRunning {
-		reqLogger.Info("Pod is labeled as running but the JBoss CLI cannot. It will be hopefully accessible in a while for "+
+		reqLogger.Info("Pod is labeled as running but the JBoss CLI cannot proceed. It will be hopefully accessible in a while for "+
 			"transaction recovery may proceed with scale down.", "Pod Name", scaleDownPodName, "Object Name", w.ObjectMeta.Name,
 			"Error", errCli)
 		return requeueLater, nil
@@ -202,6 +209,7 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 			reqLogger.Error(err, "Cannot restart application server after setting up the periodic recovery properties, "+
 				"pod will be deleted to be relaunched.", "Pod Name", scaleDownPodName)
 			resources.Delete(w, r.client, scaleDownPod)
+			return requeueNow, err
 		}
 
 		reqLogger.Info("Marking pod as being setup for transaction recovery. Adding annotation "+markerRecoveryPropertiesSetup, "Pod Name", scaleDownPodName)
@@ -209,27 +217,38 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 			scaleDownPod.GetAnnotations(), map[string]string{markerRecoveryPropertiesSetup: "true"})
 		scaleDownPod.SetAnnotations(annotations)
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
-			return requeueNow, fmt.Errorf("Failed to update pod annotations, pod name %v, annotations to be set %v, error: %v",
-				scaleDownPodName, scaleDownPod.Annotations, err)
+			if apiErrors.IsConflict(err) {
+				return requeueNow, nil // conflict require reconciliation but it's not an error to be reported
+			} else {
+				return requeueNow, fmt.Errorf("Failed to update pod annotation %s, pod name %s, annotations %v, error: %v",
+					markerRecoveryPropertiesSetup, scaleDownPodName, scaleDownPod.Annotations, err)
+			}
 		}
 
-		return requeueOff, nil
+		return requeueLater, nil
 	}
 	reqLogger.Info("Recovery properties at pod were already defined. Skipping server restart.", "Pod Name", scaleDownPodName)
 	return requeueOff, nil
 }
 
-func (r *ReconcileWildFlyServer) updatePodLabel(w *wildflyv1alpha1.WildFlyServer, scaleDownPod *corev1.Pod, labelName, labelValue string) (bool, error) {
-	updated := false
+// updatePodLabel updates the pod with the label and value
+// returns true if reconciliation is needed after the update, otherwise false
+//         error if a trouble on updating of the label occurs
+func (r *ReconcileWildFlyServer) updatePodLabel(w *wildflyv1alpha1.WildFlyServer, scaleDownPod *corev1.Pod, labelName,
+	labelValue string) (bool, error) {
 	if scaleDownPod.ObjectMeta.Labels[labelName] != labelValue {
 		scaleDownPod.ObjectMeta.Labels[labelName] = labelValue
 		if err := resources.Update(w, r.client, scaleDownPod); err != nil {
-			return false, fmt.Errorf("Failed to update pod labels for pod %v with label [%s=%s], error: %v",
-				scaleDownPod.ObjectMeta.Name, labelName, labelValue, err)
+			if apiErrors.IsConflict(err) {
+				return true, nil // not reporting error but requiring the reconciliation
+			} else {
+				return true, fmt.Errorf("Failed to update pod labels for pod %v with label [%s=%s], error: %v",
+					scaleDownPod.ObjectMeta.Name, labelName, labelValue, err)
+			}
 		}
-		updated = true
+		return true, nil // sucessful update, let's reconciliate
 	}
-	return updated, nil
+	return false, nil // no update, no error
 }
 
 // processTransactionRecoveryScaleDown runs transaction recovery on provided number of pods
@@ -278,7 +297,7 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 		w.Status.ScalingdownPods = int32(numberOfPodsToScaleDown)
 		err := resources.UpdateWildFlyServerStatus(w, r.client)
 		if err != nil {
-			err = fmt.Errorf("There was trouble to update state of WildflyServer: %v, error: %v", w.Status.Pods, err)
+			err = fmt.Errorf("Trouble to update state of WildflyServer: %v, error: %v", w.Status.Pods, err)
 		}
 		return requeueNow, err
 	}
@@ -380,6 +399,9 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 		if err != nil {
 			return requeueNow, fmt.Errorf("Error to update state of WildflyServer after recovery processing for pods %v, "+
 				"error: %v. Recovery processing errors: %v", w.Status.Pods, err, resultError)
+		}
+		if mustReconcile == requeueOff {
+			mustReconcile = requeueLater
 		}
 	}
 

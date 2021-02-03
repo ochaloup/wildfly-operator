@@ -2,9 +2,10 @@ package wildflyserver
 
 import (
 	"context"
-	"github.com/operator-framework/operator-sdk/pkg/log/zap"
 	"testing"
 	"time"
+
+	"github.com/operator-framework/operator-sdk/pkg/log/zap"
 
 	wildflyv1alpha1 "github.com/wildfly/wildfly-operator/pkg/apis/wildfly/v1alpha1"
 	"github.com/wildfly/wildfly-operator/pkg/resources/services"
@@ -306,6 +307,7 @@ func TestWildFlyServerControllerScaleDown(t *testing.T) {
 		}
 		return false, nil
 	})
+	require.NoError(t, err)
 
 	log.Info("WildFly server was reconciliated to the state the pod status corresponds with namespace. Let's scale it down.",
 		"WildflyServer", wildflyServer)

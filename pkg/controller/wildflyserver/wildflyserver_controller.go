@@ -186,9 +186,9 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 
 	// Processing scaled down
 	//   updating scaling-down pods for not being requests through loadbalancer
-	updated, err := r.setLabelAsDisabled(wildflyServer, reqLogger, resources.MarkerOperatedByLoadbalancer, int(numberOfPodsToScaleDown), podList)
-	if updated || err != nil { // labels were updated (updated == true) or some error occured (err != nil)
-		return reconcile.Result{Requeue: updated}, err
+	isReconcileNeeded, err := r.setLabelAsDisabled(wildflyServer, reqLogger, resources.MarkerOperatedByLoadbalancer, int(numberOfPodsToScaleDown), podList)
+	if isReconcileNeeded { // isReconcileNeeded is true on succesful update or in case of error
+		return reconcile.Result{Requeue: true}, err
 	}
 	// Processing recovery on pods which are planned to be removed because of scale down is in progress now
 	reconcileRecovery, err := r.processTransactionRecoveryScaleDown(reqLogger, wildflyServer, int(numberOfPodsToScaleDown), podList)
@@ -306,9 +306,13 @@ func (r *ReconcileWildFlyServer) Reconcile(request reconcile.Request) (reconcile
 	}
 
 	if updateWildflyServer {
-		if err := resources.UpdateWildFlyServerStatus(wildflyServer, r.client); err != nil {
+		err = resources.UpdateWildFlyServerStatus(wildflyServer, r.client)
+		if apiErrors.IsConflict(err) { // retry the update in the next reconcile cycle
+			return reconcile.Result{Requeue: true}, nil
+		}
+		if err != nil {
 			reqLogger.Error(err, "Failed to update WildFlyServer status.")
-			return reconcile.Result{}, err
+			return reconcile.Result{Requeue: true}, err
 		}
 		reconcileStatus = true
 	}
@@ -409,7 +413,6 @@ func (r *ReconcileWildFlyServer) checkStatefulSet(wildflyServer *wildflyv1alpha1
 		if delete {
 			// VolumeClaimTemplates has changed, the statefulset can not be updated and must be deleted
 			if err = resources.Delete(wildflyServer, r.client, foundStatefulSet); err != nil {
-				log.Error(err, "Failed to Delete StatefulSet.", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
 				return requeueNow, err
 			}
 			log.Info("Deleting StatefulSet that is not up to date with the WildFlyServer StorageSpec", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
@@ -420,18 +423,25 @@ func (r *ReconcileWildFlyServer) checkStatefulSet(wildflyServer *wildflyv1alpha1
 		foundStatefulSet.Spec.Template = statefulSet.Spec.Template
 		foundStatefulSet.Spec.Replicas = &desiredStatefulSetReplicaSize
 		foundStatefulSet.Annotations[resources.MarkerServerGeneration] = strconv.FormatInt(wildflyServer.Generation, 10)
-		if err = resources.Update(wildflyServer, r.client, foundStatefulSet); err != nil {
-			log.Error(err, "Failed to Update StatefulSet.", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
+		err = resources.Update(wildflyServer, r.client, foundStatefulSet)
+		if apiErrors.IsConflict(err) {
+			return requeueNow, nil
+		}
+		if err != nil {
 			return requeueNow, err
 		}
-		log.Info("Updating StatefulSet to be up to date with the WildFlyServer Spec", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
+
+		log.Info("StatefulSet updated to be up to date with the WildFlyServer Spec", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
 		return requeueNow, nil
 	}
 
 	if update {
-		log.Info("Updating statefulset", "StatefulSet.Replicas", foundStatefulSet.Spec.Replicas)
-		if err = resources.Update(wildflyServer, r.client, foundStatefulSet); err != nil {
-			log.Error(err, "Failed to update StatefulSet.", "StatefulSet.Namespace", foundStatefulSet.Namespace, "StatefulSet.Name", foundStatefulSet.Name)
+		log.Info("Updating StatefulSet", "StatefulSet.Replicas", foundStatefulSet.Spec.Replicas)
+		err = resources.Update(wildflyServer, r.client, foundStatefulSet)
+		if apiErrors.IsConflict(err) { // version conflict, retry the update in the next reconcile cycle
+			return requeueNow, nil
+		}
+		if err != nil {
 			return requeueNow, err
 		}
 		return requeueNow, nil

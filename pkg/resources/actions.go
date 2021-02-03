@@ -31,7 +31,7 @@ func Create(w *wildflyv1alpha1.WildFlyServer, client client.Client, scheme *runt
 	MarkServerGeneration(w, meta)
 
 	if err := controllerutil.SetControllerReference(w, meta, scheme); err != nil {
-		logger.Error(err, "Failed to set controller reference for new resource")
+		logger.Info("Failed to set controller reference for new resource", "Error", err)
 		return err
 	}
 	logger.Info("Set controller reference for new resource")
@@ -46,7 +46,7 @@ func Create(w *wildflyv1alpha1.WildFlyServer, client client.Client, scheme *runt
 
 // Get returns the object from the objectDefinition
 func Get(w *wildflyv1alpha1.WildFlyServer, namespacedName types.NamespacedName, client client.Client, objectDefinition runtime.Object) error {
-	logger := log.WithValues("WildFlyServer.Namespace", w.Namespace, "WildFlyServer.Name", w.Name, "Resource.Name", namespacedName.Name)
+	logger := logWithValues(w, objectDefinition)
 	logger.Info("Getting resource")
 
 	if err := client.Get(context.TODO(), namespacedName, objectDefinition); err != nil {
@@ -72,7 +72,7 @@ func Update(w *wildflyv1alpha1.WildFlyServer, client client.Client, objectDefini
 	}
 
 	if err := client.Update(context.TODO(), objectDefinition); err != nil {
-		logger.Error(err, "Failed to update resource")
+		logger.Info("Failed to update resource", "Error", err)
 		return err
 	}
 
@@ -86,7 +86,7 @@ func UpdateStatus(w *wildflyv1alpha1.WildFlyServer, client client.Client, object
 	logger.Info("Updating status of resource")
 
 	if err := client.Status().Update(context.Background(), objectDefinition); err != nil {
-		logger.Error(err, "Failed to update status of resource")
+		logger.Info("Failed to update status of resource", "Error", err)
 		return err
 	}
 
@@ -100,7 +100,7 @@ func UpdateWildFlyServerStatus(w *wildflyv1alpha1.WildFlyServer, client client.C
 	logger.Info("Updating status of WildFlyServer")
 
 	if err := client.Status().Update(context.Background(), w); err != nil {
-		logger.Error(err, "Failed to update status of WildFlyServer")
+		logger.Info("Failed to update status of WildFlyServer", "Error", err)
 		return err
 	}
 
@@ -114,7 +114,7 @@ func Delete(w *wildflyv1alpha1.WildFlyServer, client client.Client, objectDefini
 	logger.Info("Deleting Resource")
 
 	if err := client.Delete(context.TODO(), objectDefinition); err != nil {
-		logger.Error(err, "Failed to delete  resource")
+		logger.Info("Failed to delete resource", "Error", err)
 		return err
 	}
 
