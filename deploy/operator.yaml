@@ -15,7 +15,8 @@ spec:
       serviceAccountName: wildfly-operator
       containers:
         - name: wildfly-operator
-          image: quay.io/wildfly/wildfly-operator:latest
+          # oc new-project wildfly-operator
+          image: image-registry.openshift-image-registry.svc:5000/wildfly-operator/wildfly-operator:latest
           command:
           - wildfly-operator
           imagePullPolicy: Always
@@ -29,7 +30,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: OPERATOR_NAME
-              value: "wildfly-operator"
+              value: "eap-operator"
 
 ---
 
