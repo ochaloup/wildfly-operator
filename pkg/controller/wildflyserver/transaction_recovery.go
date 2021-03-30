@@ -193,6 +193,10 @@ func (r *ReconcileWildFlyServer) setupRecoveryPropertiesAndRestart(reqLogger log
 				setPeriodOps, scaleDownPodName, jsonResult, errExecution)
 		}
 
+		reqLogger.Info("Setting system property 'org.wildfly.internal.cli.boot.hook.marker.dir' at '/tmp/markerdir/wf-cli-shutdown-initiated'", "Pod Name", scaleDownPodName)
+		wildflyutil.ExecRemote(scaleDownPod, "mkdir /tmp/markerdir && touch /tmp/markerdir/wf-cli-shutdown-initiated || true")
+		wildflyutil.ExecuteMgmtOp(scaleDownPod, "/system-property=org.wildfly.internal.cli.boot.hook.marker.dir:add(value=/tmp/markerdir)")
+
 		reqLogger.Info("Restarting application server to apply the env properties", "Pod Name", scaleDownPodName)
 		if err := wildflyutil.ExecuteOpAndWaitForServerBeingReady(reqLogger, wildflyutil.MgmtOpRestart, scaleDownPod); err != nil {
 			reqLogger.Error(err, "Cannot restart application server after setting up the periodic recovery properties, "+
@@ -308,8 +312,6 @@ func (r *ReconcileWildFlyServer) processTransactionRecoveryScaleDown(reqLogger l
 			if podState != wildflyv1alpha1.PodStateScalingDownClean {
 				reqLogger.Info("Transaction recovery scaledown processing", "Pod Name", scaleDownPodName,
 					"IP Address", scaleDownPodIP, "Pod State", podState, "Pod Phase", scaleDownPod.Status.Phase)
-
-				// TODO: check if it's possible to set graceful shutdown here
 
 				// For full and correct recovery we need to first, run two recovery checks and second, having the orphan detection interval set to minimum
 				needsReconcile, setupErr := r.setupRecoveryPropertiesAndRestart(reqLogger, &scaleDownPod, w)
